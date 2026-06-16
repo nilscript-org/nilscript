@@ -20,6 +20,10 @@ It is **Turing-complete for its domain, not in general.** It can express any com
 automation a merchant can describe — *and nothing else*. There are no unbounded loops, no
 file or network access, no user-defined abstractions. (See §6 — that ceiling is the feature.)
 
+It is also a **Saga**: a multi-step program declares how each effect is undone
+(`action.compensate_with`), so a failed program is walked back via governed compensation
+rather than left half-applied (axiom 5; [02 §3.1](02-GRAMMAR-AND-PRIMITIVES.md)).
+
 ### What it is **not**
 
 - **Not a replacement for NIL.** NIL ([Network Intent Layer](../plan-docs/02-NIL-CLIENT.md))
@@ -119,8 +123,13 @@ one of these.
    human-approved preview — this is hard rule 3 of the conversational layer, lifted into the
    language.
 4. **Self-Healing Grammar.** The language carries error-handling metadata (`on_error`,
-   `retry_policy`). On failure the runtime informs the agent with a structured diagnostic,
-   enabling it to *re-compile a corrected program* dynamically rather than dead-ending.
+   `retry_policy`). It heals in **both directions.** *Forward:* on failure the runtime informs
+   the agent with a structured diagnostic, enabling it to *re-compile a corrected program*
+   dynamically rather than dead-ending. *Backward — **Bounded Reversibility:*** every effect
+   declares whether and how it can be undone (`action.compensate_with`), so a terminally failed
+   program is walked back in reverse via governed compensation rather than left half-applied. A
+   grammar that only heals forward is only half-healing. (This is the Saga property; see
+   [02 §3.1](02-GRAMMAR-AND-PRIMITIVES.md) and [04 §7](04-EXECUTION-MODEL.md).)
 5. **Least Power / Non-Turing-Completeness.** The language is deliberately incomplete. No
    unbounded recursion, no `eval`, no host access. Illegal states are structurally
    unrepresentable. (Dhall's safety argument, Fowler's "limited expressiveness," the

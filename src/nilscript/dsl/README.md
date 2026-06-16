@@ -32,6 +32,11 @@ preview → (human confirm) → `COMMIT` against a whitelisted skill verb. NIL s
 southbound contract; the DSL adds the *control flow between* NIL sentences that one chat turn
 cannot express today.
 
+A multi-step program is also a **Saga**: each `action` may declare `compensate_with`, so on
+terminal failure the runtime unwinds completed steps in reverse via a governed NIL `ROLLBACK`
+(the 7th performative) rather than leaving the program half-applied — "no silent write" holds
+even when undoing.
+
 ```
  merchant intent ──LLM──▶ Wosool program (JSON DAG) ──validator──▶ admitted graph
         │                                                                 │
@@ -50,7 +55,7 @@ cannot express today.
 | [01-LANGUAGE-OVERVIEW.md](01-LANGUAGE-OVERVIEW.md) | Definition, goals, axioms, the tri-layer stack, why-a-DSL |
 | [02-GRAMMAR-AND-PRIMITIVES.md](02-GRAMMAR-AND-PRIMITIVES.md) | The closed node set, data references, the expression sub-language |
 | [03-VALIDATION-AND-TYPES.md](03-VALIDATION-AND-TYPES.md) | The `WosoolDSLValidator` pipeline, whitelist, diagnostics |
-| [04-EXECUTION-MODEL.md](04-EXECUTION-MODEL.md) | Durable runtime, NIL compilation, lifecycle, self-healing |
+| [04-EXECUTION-MODEL.md](04-EXECUTION-MODEL.md) | Durable runtime, NIL compilation, lifecycle, self-healing, the Saga unwind |
 | [05-STANDARD-LIBRARY.md](05-STANDARD-LIBRARY.md) | The skill catalog as the standard library |
 | [06-EXAMPLES.md](06-EXAMPLES.md) | Worked programs and the NIL they compile to |
 | [07-MAPPING-TO-REPO.md](07-MAPPING-TO-REPO.md) | Every DSL concept → the file/class that already implements it |

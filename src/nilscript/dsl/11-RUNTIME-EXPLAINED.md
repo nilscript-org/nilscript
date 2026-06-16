@@ -342,6 +342,47 @@ key, so a retry or a replay re-issues *the same* sentence and never double-creat
 break replay). Same rule the repo already encodes in `CommitBody.idempotency_key` and
 `IntentTaskFlow`'s `parent_turn_id:task_id`.
 
+## B.8.1 The Saga unwind — what happens when a multi-step program fails
+
+If the program declares `on_error: "compensate"` and a step **terminally** fails after earlier
+steps already committed, the interpreter does not stop with a half-applied program. It **walks
+the committed steps in reverse commit order and undoes each** — the Saga unwind (axiom 4's
+backward half, [04 §7.1](04-EXECUTION-MODEL.md)).
+
+The loop already recorded which steps committed (they are the keys in `ctx`). Sketch:
+
+```python
+async def _unwind(self, ctx, program, run_id):
+    for step_id in reversed(list(ctx)):          # newest committed step first
+        node = program.nodes[step_id]
+        comp = node.get("compensate_with")
+        if comp is None:                          # IRREVERSIBLE → cannot undo
+            return PartialResult(undone=..., blocked_at=step_id)   # honest partial, never "success"
+        if step_id not in auto_compensate_grant:  # COMPENSABLE / not blessed
+            await self._park_for_decide(step_id)  # wait for a human DECIDE; never auto-reverse
+            continue
+        args = resolve(comp["args"], ctx)         # backward-only refs (B.4): own/earlier outputs
+        key  = f"{run_id}:{step_id}:rollback"     # deterministic, idempotent (B.8)
+        await workflow.execute_activity(
+            activities.ROLLBACK,                  # requests a reversal — does NOT write directly
+            RollbackInput(verb=comp["verb"], args=args, idempotency_key=key))
+        # ROLLBACK is answered by a PROPOSAL (compensation preview) → COMMIT: no silent write
+```
+
+Three rules make this safe and honest:
+
+- **Auto only for blessed REVERSIBLE steps.** A step compensates automatically *only* if it sits
+  on the `auto_compensate` grant allowlist. COMPENSABLE / non-allowlisted steps **park** for a
+  human `DECIDE`; the runtime never silently reverses what was not pre-blessed.
+- **An IRREVERSIBLE step (no `compensate_with`) blocks a full rollback.** The run is then reported
+  as an honest **partial** — what was undone and where it stopped — never dressed up as success.
+- **A reversal is itself governed.** `ROLLBACK` does not execute a write; it requests one,
+  answered by a `PROPOSAL` (compensation preview) that is then `COMMIT`ted. Preview-then-confirm
+  holds even while undoing. Refusals seen here: `IRREVERSIBLE`, `COMPENSATION_EXPIRED`.
+
+Because the keys are workflow-derived (`run_id:step_id:rollback`), a crash *during* the unwind
+replays and resumes the unwind at the right step — it never double-undoes.
+
 ## B.9 Worked traces — watch `ctx` evolve
 
 ### Trace 1 — `conformance/valid/01-single-action.json`

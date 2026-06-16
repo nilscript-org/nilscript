@@ -32,7 +32,7 @@ A Wosool program is a single JSON object:
 | `locale` | `"ar"` \| `"en"` \| BCP-47 short | Default locale for previews/replies. Arabic-first default. |
 | `entry` | node id | The start node (ASL `StartAt`). Must be a defined node. |
 | `pipeline` | array of nodes | The node set. Order is *declaration* order, not execution order — execution order is the topological sort. |
-| `on_error` | `"halt"` \| `"continue"` \| `"compensate"` | Program-level default failure policy; a node may override. |
+| `on_error` | `"halt"` \| `"continue"` \| `"compensate"` | Program-level default failure policy; a node may override. `"compensate"` makes the program a **Saga**: on terminal failure the runtime unwinds completed steps in reverse via governed compensation (§3.1, [04 §7](04-EXECUTION-MODEL.md)). |
 
 > **Why a flat `pipeline` array, not nested blocks?** A flat, ID-addressed node map (ASL
 > `States`, Argo `dag.tasks`) keeps every branch target a first-class, validatable reference
@@ -88,6 +88,37 @@ The core primitive. One node → one skill → one NIL `PROPOSE` (then, after ap
 | `skill` | Must be a registered skill name (`product`, `coupon`, `invoice`, `refund`, `order_status`, …). |
 | `verb` | Must be that skill's `required_verb` **and** allowed by the workspace's grant scopes (`scope_allows`). |
 | `args` | A bag of **hints** (see the box below). Validated against the skill's `hint_schema`; values may be literals *or* data references (§4). |
+| `compensate_with` | *Optional.* A **compensating action** `{verb, args}` declaring how to undo this step if a later step fails. Makes the program a Saga. See below. |
+
+**`compensate_with` — the undo handle (Saga).** An `action` may declare how to reverse
+itself. The value is a compensating action with the same `{verb, args}` shape as the action it
+undoes:
+
+```json
+{
+  "id": "step_2",
+  "type": "action",
+  "skill": "invoice",
+  "verb": "commerce.create_invoice",
+  "args": { "order": "$.step_1.output.id" },
+  "compensate_with": {
+    "verb": "commerce.void_invoice",
+    "args": { "invoice": "$.step_2.output.id" }
+  },
+  "next": "step_3"
+}
+```
+
+- The compensation's `args` derive from prior results by **backward-only** reference
+  (`$.step_2.output.id`, `$.step_1.output.id`) — never a forward reference, preserving the
+  least-power data-flow rule (§4). A compensation may read its *own* step's `output` (the thing
+  it is undoing) and any earlier step's output.
+- It does **not** execute on declaration. On terminal failure of a `compensate` program, the
+  runtime issues a NIL `ROLLBACK` per completed step in reverse commit order; the reversal is
+  itself governed (preview → confirm), so "no silent write" holds even when undoing
+  ([04 §7](04-EXECUTION-MODEL.md), [11 Part B](11-RUNTIME-EXPLAINED.md)).
+- A step with no `compensate_with` declares itself *irreversible*: it cannot be auto-rolled-back
+  and forces an honest partial rather than a false "success".
 
 > **`args` are HINTS, not authoritative values** — the most important and most easily-missed
 > rule. This layer forwards string hints; the **business OS resolves them authoritatively** and
@@ -228,7 +259,7 @@ Sends a bilingual chat message to the merchant. Maps to the `SEND_OUTBOUND` acti
 
 | Type | Side effect | NIL performative | Runtime primitive | Status |
 |---|---|---|---|---|
-| `action` | proposes a change | `PROPOSE` → `COMMIT` | engine `_propose` / `IntentTaskFlow` | 🟢 |
+| `action` | proposes a change | `PROPOSE` → `COMMIT` (undo: `ROLLBACK`) | engine `_propose` / `IntentTaskFlow` | 🟢 |
 | `query` | none (read) | `QUERY` | `QUERY` activity / `MorningBriefing` | 🟢 |
 | `condition` | none (route) | — | *interpreter* | 🔴 |
 | `parallel` | fans out | (per branch) | `MultiIntentFlow` | 🟢 |
@@ -317,7 +348,9 @@ CEL guarantees all three by construction; `eval` guarantees none. JSONPath can *
 
 ## 6. Error-handling grammar (self-healing metadata)
 
-Any node may carry failure metadata. This is axiom 4 made syntactic.
+Any node may carry failure metadata. This is axiom 4 made syntactic — and axiom 4 heals
+*both* directions: forward (diagnostic → re-compile) and backward (`compensate_with` →
+governed unwind). A step's `compensate_with` (§3.1) is the backward half.
 
 ```json
 {
@@ -333,7 +366,7 @@ Any node may carry failure metadata. This is axiom 4 made syntactic.
 |---|---|---|
 | `retry_policy.max_attempts` | int ≥ 1 | Temporal `RetryPolicy(maximum_attempts=…)` (already used in `IntentTaskFlow`). |
 | `retry_policy.backoff` | `"exponential"` \| `"fixed"` | Temporal backoff coefficient. |
-| `on_error.action` | `"halt"` \| `"continue"` \| `"route"` \| `"compensate"` | What the runtime does after retries exhaust. |
+| `on_error.action` | `"halt"` \| `"continue"` \| `"route"` \| `"compensate"` | What the runtime does after retries exhaust. `"compensate"` triggers the Saga unwind ([04 §7](04-EXECUTION-MODEL.md)). |
 | `on_error.to` | node id | Target when `action: "route"`. |
 
 On terminal failure the runtime emits a **structured diagnostic** (node id, error class,

@@ -75,10 +75,12 @@ The runtime never invents a southbound call. Each node compiles to NIL:
 | `query` | `QUERY` | `QUERY` activity (existing) |
 | `await_approval` | poll `STATUS` until terminal | `POLL_STATUS` activity (existing) |
 | `notify` | — (channel send) | `SEND_OUTBOUND` activity (existing) |
+| `action` (undo, on Saga unwind) | `ROLLBACK` → (preview) → `COMMIT` | `COMMIT` activity (existing) |
 | `condition`/`foreach`/`parallel`/`wait` | — (control flow) | in-workflow |
 
-`PROPOSE`/`COMMIT`/`QUERY`/`STATUS` are exactly the performatives in
-`packages/nilscript/sdk/src/nilscript/sdk/sentences.py`. The DSL adds **no** new performative and
+The seven speaker-plane performatives a DSL action/query compiles to are `PROPOSE`, `PROPOSAL`,
+`COMMIT`, `QUERY`, `STATUS`, `EVENT`, and `ROLLBACK` (the 7th, backward-recovery, added in place
+on the 0.1 dialect) — all in `packages/nilscript/sdk/src/nilscript/sdk/sentences.py`. The DSL
 **cannot** emit `DECIDE` (owner-plane). The business OS remains the system of record; the graph
 holds zero business state and reads truth fresh via `query`.
 
@@ -169,6 +171,34 @@ The diagnostic contract is what makes the LLM a *recoverable* compiler rather th
 one. The structured-error format from [03 §8](03-VALIDATION-AND-TYPES.md) is the same shape
 consumed here.
 
+That is forward healing. When forward repair is not enough — a multi-step program fails after
+some steps already committed — the runtime heals **backward** instead (§7.1).
+
+### 7.1 Backward recovery — the Saga unwind (axiom 4, Bounded Reversibility)
+
+When a program declares `on_error: "compensate"`, it is a **Saga**: a terminal failure does not
+leave committed steps half-applied. The durable runtime **unwinds the completed steps in
+reverse commit order** via governed compensation.
+
+- Each committed `action` left a **compensation handle** (its `compensate_with` action, [02
+  §3.1](02-GRAMMAR-AND-PRIMITIVES.md)). The unwind walks completed steps newest-first and issues
+  one NIL **`ROLLBACK`** (the 7th performative, backward-recovery) per completed step.
+- **A reversal is itself governed.** `ROLLBACK` does **not** execute a write — it *requests* a
+  reversal, answered by a `PROPOSAL` (the compensation preview) that is then `COMMIT`ted. So
+  preview-then-confirm — "no silent write" — holds even while undoing.
+- **What auto-runs vs. what stops:**
+  | Step class | Unwind behaviour |
+  |---|---|
+  | **REVERSIBLE** (on the `auto_compensate` grant allowlist) | Compensation runs automatically — pre-blessed. |
+  | **COMPENSABLE** / non-allowlisted | **Parks** for a human `DECIDE`; the runtime never auto-reverses what was not blessed. |
+  | **IRREVERSIBLE** (no `compensate_with`) | **Blocks** a full rollback. The run is reported honestly as a **partial** — never "success". |
+- New refusal codes surface here: `IRREVERSIBLE` (the step cannot be undone) and
+  `COMPENSATION_EXPIRED` (the reversal window has lapsed).
+
+The unwind reuses the same idempotency discipline (§5): each `ROLLBACK`/compensating `COMMIT`
+carries a workflow-derived key, so a replay re-issues the same reversal and never double-undoes.
+Full trace in [11-RUNTIME-EXPLAINED.md Part B](11-RUNTIME-EXPLAINED.md).
+
 ---
 
 ## 8. What the runtime guarantees
@@ -181,6 +211,7 @@ consumed here.
 | **Isolation** | append-only immutable context; per-branch failure isolation |
 | **Bounded cost** | no unbounded loops (validator) + `foreach.max_items` + retry caps |
 | **No silent partial execution** | preview-then-confirm; each node's outcome is its own reply |
+| **Bounded Reversibility** | `on_error: compensate` → reverse-order Saga unwind via governed `ROLLBACK`; auto only for blessed REVERSIBLE steps, others park/block, irreversible reported as honest partial (§7.1) |
 
 ---
 

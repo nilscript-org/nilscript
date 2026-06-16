@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0 — Unreleased
+**Bounded Reversibility — a 7th performative, ROLLBACK, added in place on the 0.1 wire.**
+Fully additive and backward-compatible: every existing 0.1 message, DSL program, and profile
+remains valid; the envelope `nil` const **stays "0.1"** (no new schema namespace). Any unmarked
+verb is IRREVERSIBLE by default (zero-touch). Package version `0.2.0 → 0.3.0`. The upgraded kernel
+is named **SEQRD-PC** — a mnemonic re-cut of the same set: S·STATUS, E·EVENT, Q·QUERY, R·ROLLBACK,
+D·DECIDE, P·PROPOSE, C·COMMIT. Full test suite green at 160.
+### Added
+- **Wire:** `ROLLBACK` added to the envelope `performative` enum; new `rollback.schema.json`.
+  EVENT `result` gains a `compensation` object `{reversibility, token?, expires_at?}`; new EVENT
+  kinds (compensating / compensated / compensation_refused); new refusal codes `IRREVERSIBLE` and
+  `COMPENSATION_EXPIRED`. New endpoint `POST /nil/v0.1/rollback` — NIL now exposes **six** endpoints;
+  `export-openapi` emits all six.
+- **SDK:** `Performative.ROLLBACK`; `Reversibility` + `RollbackReason` enums; `RollbackBody`;
+  `Compensation` on the result envelope.
+- **Profiles:** a `reversibility` tier per verb (REVERSIBLE / COMPENSABLE / IRREVERSIBLE) plus an
+  optional `compensation` block. Examples: `commerce.create_product`=REVERSIBLE,
+  `commerce.record_payment`=COMPENSABLE, `commerce.send_message`=IRREVERSIBLE.
+- **CLI toolkit:** `scan` infers tiers (`propose_reversibility`); `scaffold` emits a
+  `compensation.py` stub; `manifest` validates/merges/diffs reversibility (diff flags tier drift =
+  CI drift guard); `conformance-test` adds rollback-honesty rows; `repair` gains `run_saga_unwind`
+  (reverse-order governed compensation); memory gains `record_reversal` + `anchor_ratification`
+  (+ `compute_spec_hash`).
+- **DSL:** `action` nodes gain `compensate_with` — the language is now a Saga (`on_error: compensate`
+  already existed).
+### Changed
+- The fifth axiom (self-healing grammar) now heals forward **and** backward ("Bounded
+  Reversibility") — still five axioms.
+
 ## 0.2.0-draft — 2026-06-15
 **Structural alignment release** — realigns the commerce/services lexicon with NIL's own
 "intent, not implementation" philosophy, grounded in an 18-platform / 90-row calibration against

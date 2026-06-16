@@ -8,7 +8,7 @@ Python SDK ships alongside for convenience — but the standard does not depend 
 
 | Layer | Name | What it is |
 |-------|------|------------|
-| **Operations** | **NIL** — Network Intent Layer | The wire contract: how an agent *proposes* an action to a backend, how the backend *answers*, the envelope, grants, refusals, and per-domain profiles (commerce, services). The "USB protocol." |
+| **Operations** | **NIL** — Network Intent Layer | The wire contract: how an agent *proposes* an action to a backend, how the backend *answers*, *rolls back* a governed action, the envelope, grants, refusals, and per-domain profiles (commerce, services). Seven performatives (**SEQRD-PC**: STATUS·EVENT·QUERY·ROLLBACK·DECIDE·PROPOSE·COMMIT) on the stable `nil: "0.1"` wire. The "USB protocol." |
 | **Orchestration** | **nilscript DSL** | A declarative, JSON-based, LLM-native language a graph layer *above* NIL: an agent writes a program, a static validator admits it, a durable runtime executes it. |
 
 The two layers are specs, not software. A reference implementation (`wosool-cloud`)

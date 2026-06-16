@@ -41,7 +41,7 @@ Every agent-plane sentence is an **Envelope**
 {
   "nil": "0.1",
   "id": "<≥8 chars, unique or idempotency-keyed>",
-  "performative": "PROPOSE | PROPOSAL | COMMIT | STATUS | QUERY | EVENT",
+  "performative": "PROPOSE | PROPOSAL | COMMIT | STATUS | QUERY | EVENT | ROLLBACK",
   "grant": "<grant id>",
   "workspace": "<workspace id>",
   "ts": "<RFC3339>",
@@ -59,9 +59,18 @@ Endpoints ([client.py:34-37](../packages/nilscript/sdk/src/nilscript/sdk/client.
 | QUERY   | `POST /nil/v0.1/query`   | `QueryBody`   | **bare** `{ "data": { … } }` — *not* an envelope ([client.py:154](../packages/nilscript/sdk/src/nilscript/sdk/client.py#L154)) |
 | STATUS  | `GET  /nil/v0.1/status/{proposal_id}` | — | Envelope `STATUS` |
 | EVENT   | backend → gateway webhook (HMAC) | `EventBody` | — |
+| ROLLBACK | `POST /nil/v0.1/rollback` | `RollbackBody` | Envelope `PROPOSAL` (compensation preview) *or* `PROPOSAL(refusal)` |
 
 `DECIDE` is owner-plane and **never** appears here (the backend may park a proposal for
 owner approval, but it does not speak DECIDE on this plane).
+
+`ROLLBACK` (the wire's 7th performative, added **in place** on this same `0.1` dialect — the
+`nil` const stays `"0.1"`) **REQUESTS** a governed reversal. It does not undo anything itself:
+it is answered by a `PROPOSAL` that *previews* the compensation, which is then `COMMIT`ted like
+any other action — so "no silent write" comes for free. The six speaker-plane endpoints are now
+propose · commit · query · status (the EVENT webhook) · rollback. A backend whose verbs are all
+`IRREVERSIBLE` still exposes `/rollback`, but implements it **trivially**: it always answers with
+a `refusal{ code: "IRREVERSIBLE" }`. The kernel that closes this loop is **SEQRD-PC**.
 
 ---
 
@@ -86,7 +95,9 @@ enforced by validator:
 ```
 - `preview` keys are BCP-47 short tags; `ar` is primary. Refusals carry **no** preview.
 - `AMBIGUOUS` refusals MUST carry `candidates` (≤8). Full code list:
-  [refusals.py](../packages/nilscript/sdk/src/nilscript/sdk/refusals.py).
+  [refusals.py](../packages/nilscript/sdk/src/nilscript/sdk/refusals.py). Two codes are new with
+  ROLLBACK: **`IRREVERSIBLE`** (the verb declares no reversal) and **`COMPENSATION_EXPIRED`** (the
+  `compensation_token` is unknown or past its window).
 - A backend signals "I can't satisfy these args" as a **refusal**, never an HTTP error.
 
 **CommitBody** ([sentences.py:105](../packages/nilscript/sdk/src/nilscript/sdk/sentences.py#L105)):
@@ -121,6 +132,25 @@ instruction** (§11.2) — the backend must not smuggle directives through it.
 ```
 An `executed` event MUST carry both `proposal` and `result`
 ([sentences.py:227](../packages/nilscript/sdk/src/nilscript/sdk/sentences.py#L227)).
+
+**RollbackBody** (the body of a `POST /nil/v0.1/rollback` request):
+```json
+{ "compensation_token": "<required>",
+  "reason": "saga_unwind | owner_cancel | downstream_failed | agent_repair",
+  "idempotency_key": "<optional, ≥8 chars>" }
+```
+The `compensation_token` is required; an unknown or expired token MUST be refused
+(`COMPENSATION_EXPIRED`) and MUST NOT trigger a phantom reversal. The response is itself a
+`PROPOSAL` previewing the compensating action — the reversal only happens once that proposal is
+`COMMIT`ted. Each verb declares its **reversibility tier** in its profile (a `reversibility`
+keyword + optional `compensation` block):
+
+- **REVERSIBLE** — a clean inverse exists (e.g. delete what was created).
+- **COMPENSABLE** — no clean inverse, but an offsetting *forward* action exists (e.g. a refund
+  offsets a payment).
+- **IRREVERSIBLE** — no reversal; the System refuses honestly with `IRREVERSIBLE`. This is the
+  **default for any unmarked verb** — zero-touch back-compat, no new code — and it is a
+  **strength**, not a gap: the System refuses to pretend it can undo what it cannot.
 
 ---
 
@@ -232,3 +262,25 @@ A backend passes conformance when, for every **non-parked** verb:
 A verb the backend genuinely cannot express is recorded in that backend's own GAPS log with a
 type ((A) backend deficiency / (B) standard-leak / (C) missing general capability) — it does
 **not** bend this contract.
+
+---
+
+## 7. Rollback honesty (ROLLBACK conformance)
+
+A conforming backend is tested not only on what it *does* but on whether its reversal promises are
+honest. `conformance-test` adds **rollback-honesty rows**, reading each verb's tier from its profile
+(or from a `--reversibility` flag) and asserting:
+
+1. A **COMPENSABLE** verb's `/rollback` must actually compensate — the previewed `PROPOSAL`, once
+   committed, performs the offsetting forward action (not a no-op).
+2. An **IRREVERSIBLE** verb's `/rollback` must **refuse** with `code: "IRREVERSIBLE"` — it may not
+   pretend to undo.
+3. The reversal must be **previewed** before it lands — `/rollback` returns a `PROPOSAL`, never a
+   silent write; the compensation only executes on the subsequent `COMMIT`.
+4. An unknown or expired `compensation_token` must refuse with `COMPENSATION_EXPIRED` and **never**
+   trigger a phantom reversal.
+
+**CI drift guard.** The requirements-manifest now carries `reversibility` + `compensation` per verb.
+`manifest validate` enforces it: a REVERSIBLE/COMPENSABLE verb MUST declare a `compensation.verb`;
+an IRREVERSIBLE verb MUST NOT carry one. `manifest diff` flags a reversibility-tier change as drift
+and exits non-zero — so a shim cannot quietly claim a tier it can no longer honor.

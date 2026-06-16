@@ -43,6 +43,8 @@ It is **not**:
    POST /webhooks/nil-events   ◀───────────  EVENT(executed, result)      (HMAC-signed)
    POST /nil/v0.1/query        ───────────▶  read-through         ──▶  native read API
                                ◀───────────  { "data": { … } }
+   POST /nil/v0.1/rollback     ───────────▶  resolve token + tier ──▶  (read-only checks)
+                               ◀───────────  PROPOSAL(compensation preview | refusal)
 ```
 
 ---
@@ -51,7 +53,7 @@ It is **not**:
 
 Three layers inside the shim, low coupling between them:
 
-1. **NIL edge (HTTP).** Routes the five endpoints, validates the envelope, authenticates the
+1. **NIL edge (HTTP).** Routes the six endpoints (the sixth is `/rollback`, §4.6), validates the envelope, authenticates the
    grant/bearer, enforces the lifecycle rules (no side effects on PROPOSE; write only at
    execute). Knows NIL, knows nothing about your native API.
 2. **Translation core.** Pure mapping functions: `nil_args → native_request` and
@@ -88,6 +90,7 @@ All agent-plane sentences are an immutable **Envelope** (`extra="forbid"`):
 | QUERY | `POST /nil/v0.1/query` | `QueryBody { verb, args }` | bare `{ "data": { … } }` — **not** an envelope |
 | STATUS | `GET /nil/v0.1/status/{proposal_id}` | — | Envelope `STATUS` |
 | EVENT | *(outbound)* `POST {gateway}/webhooks/nil-events` | `EventBody` | — (you are the **sender** here, §5) |
+| ROLLBACK | `POST /nil/v0.1/rollback` | `RollbackBody { compensation_token, reason, idempotency_key? }` | Envelope `PROPOSAL` (compensation preview, **or** a refusal) |
 
 `DECIDE` is owner-plane: a HIGH+ tier proposal may **park** for owner approval (you answer COMMIT
 with `STATUS(pending_approval)` and let the agent poll STATUS), but the shim never speaks DECIDE
@@ -186,6 +189,40 @@ A verb your System genuinely cannot express is recorded in **your** gaps log (ty
 deficiency / (B) standard-leak / (C) missing general capability) — it does **not** bend the
 contract. See the gap typing in [backend-conformance.md §6](backend-conformance.md).
 
+### 4.6 ROLLBACK — compensation handlers & reversibility
+
+`ROLLBACK` is the wire's 7th performative, added **in place** on the same `0.1` dialect. It does
+not undo anything by itself: a `POST /nil/v0.1/rollback` **REQUESTS** a governed reversal, and your
+shim answers with a `PROPOSAL` that *previews* the compensation — which the agent plane then
+`COMMIT`s like any other action. That is how "no silent write" comes for free.
+
+Declare each verb's **reversibility tier** in its profile (a `reversibility` keyword + optional
+`compensation` block):
+
+- **REVERSIBLE** — a clean inverse exists. Implement a compensating handler that performs it
+  (e.g. delete the product you created). Declare `compensation.verb`.
+- **COMPENSABLE** — no clean inverse, but an offsetting *forward* action exists. Implement a handler
+  that performs that forward action (e.g. a refund offsets a payment). Declare `compensation.verb`.
+- **IRREVERSIBLE** — no reversal. `/rollback` must **refuse** with `code: "IRREVERSIBLE"` and do
+  nothing. This is the **default for any unmarked verb** (zero-touch back-compat), and refusing
+  honestly is the correct behavior — the shim never pretends to undo what it cannot.
+
+The handler flow inside `/rollback`:
+
+1. Resolve `compensation_token`. If unknown or expired, refuse `COMPENSATION_EXPIRED` — **never**
+   trigger a phantom reversal.
+2. Look up the original verb's tier. IRREVERSIBLE → refuse `IRREVERSIBLE`. Otherwise map the
+   ROLLBACK request to the verb's `compensation.verb` and return a `PROPOSAL` previewing it.
+3. The compensation lands only when that `PROPOSAL` is `COMMIT`ted (§4.2) and is reported via an
+   `EVENT(executed)` like any write. Honor `idempotency_key` so a retried rollback is a no-op.
+
+`scaffold-shim` emits a `compensation.py` stub for you — a `COMPENSATIONS` map plus a
+`compensate()` that raises until a verb is mapped; an unmapped verb therefore reads as
+**IRREVERSIBLE** by default. The requirements-manifest carries `reversibility` + `compensation` per
+verb; `manifest validate` enforces the tier rules (REVERSIBLE/COMPENSABLE require a
+`compensation.verb`; IRREVERSIBLE must not carry one) and `manifest diff` flags a tier change as
+drift (non-zero exit), so a shim cannot quietly claim a tier it can no longer honor.
+
 ---
 
 ## 5. EVENT push — reporting the real outcome
@@ -239,6 +276,9 @@ responses. Run the full matrix for every non-parked verb in your profile set. A 
 | 8 | QUERY verb | bare `{ "data": … }` of the documented shape; no side effects | read contract |
 | 9 | EVENT push with a bad signature | receiver rejects (401) | HMAC is enforced end-to-end |
 | 10 | EVENT push, duplicate sequence | receiver dedups; no double-notify | replay safety |
+| 11 | ROLLBACK a COMPENSABLE verb | `PROPOSAL` previewing the compensation; once committed, the offsetting action lands | compensation is real, previewed (no silent write) |
+| 12 | ROLLBACK an IRREVERSIBLE verb | `refusal{ code:"IRREVERSIBLE" }`; no write | honest refusal, no phantom undo |
+| 13 | ROLLBACK with unknown/expired token | `refusal{ code:"COMPENSATION_EXPIRED" }`; no reversal | no phantom reversal |
 
 **How to run it:**
 
@@ -256,7 +296,7 @@ responses. Run the full matrix for every non-parked verb in your profile set. A 
 
 ## 7. Definition of Done
 
-- [ ] All five endpoints exposed at `/nil/v0.1/*`; envelope validated with `extra="forbid"`.
+- [ ] All six endpoints exposed at `/nil/v0.1/*` (incl. `/rollback`); envelope validated with `extra="forbid"`.
 - [ ] Grant/bearer authenticated on every inbound call; unknown grant/workspace rejected.
 - [ ] PROPOSE has **no** observable side effect; preview + resolved values are real.
 - [ ] Invalid/ambiguous args → `refusal` with a standard `code` (never HTTP 4xx/5xx); `AMBIGUOUS`

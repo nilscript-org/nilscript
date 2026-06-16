@@ -22,8 +22,9 @@ sentences.
    schema → reference integrity → acyclicity → skill whitelist → argument typing →
    reachability, and the structured diagnostics it returns.
 4. **[04-EXECUTION-MODEL.md](04-EXECUTION-MODEL.md)** — how the runtime interprets an admitted
-   graph: NIL compilation, idempotency, preview-then-confirm, durable retries, and the
-   self-healing repair loop.
+   graph: NIL compilation, idempotency, preview-then-confirm, durable retries, the
+   self-healing repair loop, and the **Saga unwind** (reverse-order governed `ROLLBACK`
+   compensation on terminal failure).
 5. **[05-STANDARD-LIBRARY.md](05-STANDARD-LIBRARY.md)** — the skill catalog as the language's
    standard library: verbs, hint schemas, grant scopes.
 6. **[06-EXAMPLES.md](06-EXAMPLES.md)** — worked programs from one-liners to conditional,
