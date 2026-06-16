@@ -131,10 +131,10 @@ The template repo is essentially **"`nilscript scaffold-shim` output, frozen, wi
 - [x] Add `CONTRIBUTING.md` (the Part 3 journey + Part 4 gates) and a template-framed README.
 - [x] Decide & implement: **static scaffold now.** generate-in-CI is deferred until the kernel is PyPI-installable (Decision #4); the static scaffold is the prerequisite either way and the release-job automation layers on without rework. The offline CI gate is kept **self-contained** (no `nilscript` install), so PyPI does not gate it — only the `manifest`/`live` jobs `pip install nilscript[cli]` from git for now.
 
-**Phase 2 — first standalone official adapter**
-- [ ] `git subtree split` PocketBase out of `examples/` → `nilscript-org/pocketbase-nil-adapter`.
-- [ ] Switch it to `pip install nilscript` (no relative path) + CI (offline + live conformance + `manifest diff`).
-- [ ] Badge it `Official Verified Adapter`; add to `IMPLEMENTATIONS.md`; leave an in-core pointer.
+**Phase 2 — first standalone official adapter — done ✅**
+- [x] `git subtree split` PocketBase out of `examples/` → `nilscript-org/pocketbase-nil-adapter` (history preserved). → https://github.com/nilscript-org/pocketbase-nil-adapter
+- [x] Switch it to `pip install nilscript` (no relative path) + CI. The adapter is self-contained (no `nilscript` runtime import), so the kernel dependency lives in CI: offline proof **16/16 green** + `manifest validate` (kernel CLI from git) + an opt-in live gate (`workflow_dispatch` per-verb). `manifest diff` (re-scan vs committed) is a documented drift-guard pattern; `scan --url` live probing is not yet wired in the kernel, so CI uses `manifest validate` today.
+- [x] Badge it `Official Verified Adapter`; add to `IMPLEMENTATIONS.md`; leave an in-core pointer. The in-core `examples/pocketbase-adapter/` is **kept** as the canonical regenerate-and-verify example (Part 5 item 5), with a README banner pointing to the standalone repo.
 
 **Phase 3 — open the ecosystem**
 - [ ] Publish the community contribution flow (fork template → fill → conformance → PR).
