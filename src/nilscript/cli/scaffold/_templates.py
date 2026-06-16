@@ -343,17 +343,36 @@ def _resolve(value: Any) -> Any:
 
 
 def overlay_requirements(verb: str, native: dict[str, Any]) -> dict[str, Any]:
-    """Fill the verb's hidden requirements (from instance_values/env) into the native doc, only
-    where the translation has not already set them. Returns a new dict (no mutation)."""
+    """Fill the verb's hidden requirements (from instance_values/env) into the native doc so the
+    agent never collides with a requirement `scan` already learned (plan §4.4). Returns a new dict.
+
+    - `required_scalar` / `required_nested` -> a top-level field on the doc.
+    - `required_on_line` -> the field is injected into every line of the doc's line container
+      (default key `items`; override per-verb with `line_container` in the manifest).
+
+    Only fills where the translation left a hole, and only when an instance value resolves to a
+    non-empty value — a structural-only manifest (no instance_values set) overlays nothing.
+    """
     entry = _manifest().get("verbs", {}).get(verb, {})
     instance = entry.get("instance_values", {})
+    line_container = entry.get("line_container", "items")
     out = dict(native)
     for req in entry.get("hidden_requirements", []):
         field = req.get("field")
-        if not field or out.get(field):
+        if not field or field not in instance:
             continue
-        if field in instance:
-            out[field] = _resolve(instance[field])
+        value = _resolve(instance[field])
+        if value in (None, ""):
+            continue
+        if req.get("kind") == "required_on_line":
+            lines = out.get(line_container)
+            if isinstance(lines, list):
+                out[line_container] = [
+                    {**line, field: line.get(field) or value} if isinstance(line, dict) else line
+                    for line in lines
+                ]
+        elif not out.get(field):
+            out[field] = value
     return out
 
 
