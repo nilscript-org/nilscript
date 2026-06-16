@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from nilscript.cli._openapi import build_openapi
 from nilscript.cli._spec import SPEC_VERSION, all_verbs, load_profile
@@ -95,6 +96,88 @@ def _cmd_export_openapi(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_scaffold_shim(args: argparse.Namespace) -> int:
+    from nilscript.cli.scaffold import scaffold_shim
+
+    dest = Path(args.dest)
+    try:
+        root = scaffold_shim(args.name, dest, lang=args.lang)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"scaffolded {args.name} at {root}", file=sys.stderr)
+    print(f"  next: fill src/{root.name.replace('-', '_')}/translate.py + system.py, then `pytest`", file=sys.stderr)
+    return 0
+
+
+def _cmd_scan(args: argparse.Namespace) -> int:
+    from nilscript.cli.scan import build_manifest
+
+    if not args.replay:
+        # Live probing writes to a real system and must be --safe (plan §8); not wired in the MVP.
+        print(
+            "live --url probing is not yet wired (plan Phase-2 live mode). Use --replay FILE with "
+            "captured native errors to build the manifest deterministically.",
+            file=sys.stderr,
+        )
+        return 2
+
+    payload = json.loads(Path(args.replay).read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        samples, system, hints = payload, args.system, None
+    else:
+        samples = payload.get("samples", [])
+        system = args.system or payload.get("system")
+        hints = payload.get("resolve_hints")
+    if not system:
+        print("a system name is required (--system NAME or `system` in the replay file)", file=sys.stderr)
+        return 2
+
+    manifest = build_manifest(system, samples, resolve_hints=hints)
+    text = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+    if args.output:
+        Path(args.output).write_text(text, encoding="utf-8")
+        print(f"wrote {args.output}", file=sys.stderr)
+    else:
+        print(text)
+    return 0
+
+
+def _cmd_manifest(args: argparse.Namespace) -> int:
+    from nilscript.cli.manifest import shareable_violations, strip_instance, validate
+
+    manifest = json.loads(Path(args.file).read_text(encoding="utf-8"))
+
+    if args.action == "validate":
+        errors = validate(manifest)
+        leaks = shareable_violations(manifest)
+        for err in errors:
+            print(f"INVALID: {err}", file=sys.stderr)
+        for leak in leaks:
+            print(f"LEAK: {leak}", file=sys.stderr)
+        if errors:
+            return 1
+        if leaks:
+            print("shape OK, but NOT shareable (instance/secret leakage) — see LEAK lines above", file=sys.stderr)
+            return 1
+        print(f"valid and shareable: {manifest.get('system')} ({len(manifest.get('verbs', {}))} verbs)")
+        return 0
+
+    if args.action == "strip":
+        shared = strip_instance(manifest)
+        text = json.dumps(shared, indent=2, ensure_ascii=False) + "\n"
+        if args.output:
+            Path(args.output).write_text(text, encoding="utf-8")
+            print(f"wrote shareable manifest to {args.output}", file=sys.stderr)
+        else:
+            print(text)
+        return 0
+
+    # show
+    print(json.dumps(manifest, indent=2, ensure_ascii=False))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="nilscript",
@@ -116,6 +199,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_openapi.add_argument("--format", choices=["json", "yaml"], default="json")
     p_openapi.add_argument("-o", "--output", help="write to a file instead of stdout")
     p_openapi.set_defaults(func=_cmd_export_openapi)
+
+    p_scaffold = sub.add_parser(
+        "scaffold-shim", help="generate a bootable NIL shim skeleton for a system"
+    )
+    p_scaffold.add_argument("--name", required=True, help="project name, e.g. acme-nil-adapter")
+    p_scaffold.add_argument("--lang", default="python", choices=["python"])
+    p_scaffold.add_argument("--dest", default=".", help="directory to create the project in")
+    p_scaffold.set_defaults(func=_cmd_scaffold_shim)
+
+    p_scan = sub.add_parser(
+        "scan", help="discover a system's hidden requirements -> requirements-manifest.json"
+    )
+    p_scan.add_argument("--url", help="live system URL (live probing not yet wired; use --replay)")
+    p_scan.add_argument("--replay", help="JSON file of captured native errors to infer from")
+    p_scan.add_argument("--system", help="structural system id, e.g. erpnext")
+    p_scan.add_argument("--safe", action="store_true", help="safe mode (required for live probing)")
+    p_scan.add_argument("-o", "--output", help="write the manifest to a file instead of stdout")
+    p_scan.set_defaults(func=_cmd_scan)
+
+    p_manifest = sub.add_parser("manifest", help="work with requirements manifests")
+    p_manifest.add_argument("action", choices=["validate", "show", "strip"])
+    p_manifest.add_argument("file", help="path to a requirements-manifest.json")
+    p_manifest.add_argument("-o", "--output", help="output file (for `strip`)")
+    p_manifest.set_defaults(func=_cmd_manifest)
 
     return parser
 

@@ -19,9 +19,11 @@ dependencies = []
 
 [project.optional-dependencies]
 sdk = ["httpx>=0.27", "pydantic>=2.0"]
-# Adapter tooling (reads the standard only — no backend specifics): list the verb catalog,
-# print a verb's profile, and export the five-endpoint API surface as OpenAPI 3.1.
-# PyYAML powers `export-openapi --format yaml`. (scaffold-shim / conformance-test are future.)
+# Adapter tooling (reads the standard only — no backend specifics): the verb catalog, a verb's
+# profile, OpenAPI export, `scaffold-shim` (generate a bootable shim), `scan` (discover a system's
+# hidden requirements -> manifest), and `manifest` (validate/show/strip). PyYAML powers
+# `export-openapi --format yaml`. scaffold-shim/scan/manifest need no extra deps — the generated
+# shim carries its own (fastapi/pydantic). (conformance-test CLI is a later phase.)
 cli = ["pyyaml>=6.0"]
 dev = [
   "nilscript[sdk]",
@@ -30,6 +32,7 @@ dev = [
   "pytest-asyncio>=0.24",
   "respx",
   "jsonschema",
+  "fastapi",  # the scaffold conformance test boots a generated FastAPI shim
 ]
 
 [project.scripts]
