@@ -125,11 +125,11 @@ The template repo is essentially **"`nilscript scaffold-shim` output, frozen, wi
 - [x] PocketBase adapter built end-to-end and committed as `examples/pocketbase-adapter/` (16/16 offline, live conformance green across all three tiers).
 - [x] `examples/` excluded from the kernel's pytest.
 
-**Phase 1 — the template repo**
-- [ ] Create `nilscript-org/nil-adapter-template` (public, "Template repository").
-- [ ] Seed it from `nilscript scaffold-shim` output; wire the CI proof (red until filled).
-- [ ] Add `CONTRIBUTING.md` (the Part 3 journey + Part 4 gates).
-- [ ] Decide & implement: static scaffold vs generate-in-CI on kernel release (recommend the latter).
+**Phase 1 — the template repo — done ✅**
+- [x] Create `nilscript-org/nil-adapter-template` (public, "Template repository"). → https://github.com/nilscript-org/nil-adapter-template (`is_template=true`, default `main`).
+- [x] Seed it from `nilscript scaffold-shim` output; wire the CI proof (red until filled). CI (`conformance.yml`) has three jobs: `offline` (self-contained pytest — **red by design** until the stubs are filled: 15 verbs `not conformant yet — fill translate.py`), `manifest validate` (**green**), and an opt-in `live` gate (`workflow_dispatch` with a shim URL + verb).
+- [x] Add `CONTRIBUTING.md` (the Part 3 journey + Part 4 gates) and a template-framed README.
+- [x] Decide & implement: **static scaffold now.** generate-in-CI is deferred until the kernel is PyPI-installable (Decision #4); the static scaffold is the prerequisite either way and the release-job automation layers on without rework. The offline CI gate is kept **self-contained** (no `nilscript` install), so PyPI does not gate it — only the `manifest`/`live` jobs `pip install nilscript[cli]` from git for now.
 
 **Phase 2 — first standalone official adapter**
 - [ ] `git subtree split` PocketBase out of `examples/` → `nilscript-org/pocketbase-nil-adapter`.
@@ -145,7 +145,7 @@ The template repo is essentially **"`nilscript scaffold-shim` output, frozen, wi
 
 ## Part 9 — Open decisions (for the next session)
 
-1. **Template generation:** static checked-in scaffold vs generate-in-CI from `scaffold-shim`? (Recommended: generate-in-CI.)
+1. **Template generation:** static checked-in scaffold vs generate-in-CI from `scaffold-shim`? (Recommended: generate-in-CI.) → **Resolved (Phase 1): static now**, generate-in-CI deferred until the kernel is on PyPI (Decision #4). The static seed is the prerequisite for either path, so no rework is lost.
 2. **Monetization/governance of "Official Verified":** what exactly gates adoption — automated CI only, or core-team security review too? (Recommended: both — CI green *and* human security review.)
 3. **Hosted attestation:** is the signed-certificate service in scope soon, or do we ship with "CI-green = conformant" first? (Recommended: ship CI-green first; attestation later.)
 4. **PyPI publish of the kernel:** the standalone-adapter CI assumes `pip install nilscript` works publicly — confirm the kernel is (or will be) on PyPI as `nilscript` (the `[cli]→pydantic` coupling noted in HANDOFF.md must be fixed first).
