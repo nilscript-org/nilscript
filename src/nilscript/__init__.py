@@ -21,7 +21,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = ["spec_path", "dsl_schema_path", "load_profile", "__version__"]
 

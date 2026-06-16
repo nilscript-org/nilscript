@@ -22,9 +22,9 @@ sdk = ["httpx>=0.27", "pydantic>=2.0"]
 # Adapter tooling (reads the standard only — no backend specifics): the verb catalog, a verb's
 # profile, OpenAPI export, `scaffold-shim` (generate a bootable shim), `scan` (discover a system's
 # hidden requirements -> manifest), and `manifest` (validate/show/strip). PyYAML powers
-# `export-openapi --format yaml`. scaffold-shim/scan/manifest need no extra deps — the generated
-# shim carries its own (fastapi/pydantic). (conformance-test CLI is a later phase.)
-cli = ["pyyaml>=6.0"]
+# `export-openapi --format yaml`; pydantic backs `scaffold-shim`'s model generation
+# (cli/scaffold/_models.py). The base package stays dependency-free — these deps live only here.
+cli = ["pyyaml>=6.0", "pydantic>=2.0"]
 dev = [
   "nilscript[sdk]",
   "nilscript[cli]",
