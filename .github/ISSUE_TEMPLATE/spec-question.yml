@@ -1,0 +1,28 @@
+name: Spec question or proposal
+description: A question about the NIL standard, or a proposed normative change.
+labels: ["spec"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Normative changes follow [GOVERNANCE.md](https://github.com/nilscript-org/nilscript/blob/main/GOVERNANCE.md):
+        spec is extracted from running code, discussion ≥ 14 days, and a §15 security analysis is required.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options: ["Question (no change)", "Proposed normative change", "Clarification / editorial"]
+    validations:
+      required: true
+  - type: input
+    id: clause
+    attributes:
+      label: Relevant clause / version
+      placeholder: "e.g. NIL v0.2 §8, or commerce profile create_product"
+  - type: textarea
+    id: body
+    attributes:
+      label: Details
+      description: For a proposal — the problem, the proposed normative text, and a §15 security analysis.
+    validations:
+      required: true

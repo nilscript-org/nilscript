@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+title: "NILScript — Network Intent Layer (NIL) + the nilscript DSL"
+message: "If you use or implement this standard, please cite it."
+type: software
+authors:
+  - name: "The wosool project (NILScript Steward)"
+repository-code: "https://github.com/nilscript-org/nilscript"
+url: "https://nilscript.org"
+abstract: >-
+  NILScript is a neutral standard for letting agents act in real systems safely,
+  with confirmation, and without bespoke glue per backend. It comprises NIL (the
+  Network Intent Layer wire contract) and the nilscript DSL (an orchestration
+  language above NIL), distributed as plain JSON schemas plus an optional Python
+  reference SDK and CLI toolkit.
+keywords:
+  - nil
+  - nilscript
+  - agents
+  - intent
+  - standard
+  - protocol
+  - openapi
+  - mcp
+  - dsl
+  - schema
+license: "Apache-2.0 AND CC-BY-4.0"
+version: "0.3.0"
