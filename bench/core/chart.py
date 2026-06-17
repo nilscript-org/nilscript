@@ -16,7 +16,8 @@ from pathlib import Path
 W, H = 720, 380
 PAD_L, PAD_B, PAD_T = 48, 64, 56
 PLOT_H = H - PAD_B - PAD_T
-INK, MUTED, LINE, RAW, NIL = "#fafafa", "#a1a1aa", "#27272a", "#f87171", "#34d399"
+# Light theme — white background, high-contrast ink, semantic red (raw risk) / green (NIL = 0).
+BG, INK, MUTED, LINE, RAW, NIL = "#ffffff", "#0a0a0a", "#52525b", "#e4e4e7", "#dc2626", "#16a34a"
 
 
 def render(matrix: dict) -> str:
@@ -33,7 +34,7 @@ def render(matrix: dict) -> str:
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" '
         f'font-family="ui-sans-serif,system-ui,sans-serif">',
-        f'<rect width="{W}" height="{H}" fill="#09090b"/>',
+        f'<rect width="{W}" height="{H}" fill="{BG}"/>',
         f'<text x="{PAD_L}" y="28" fill="{INK}" font-size="16" font-weight="600">'
         f'InjecAgent — unauthorized-write rate: raw vs NIL</text>',
         f'<text x="{PAD_L}" y="46" fill="{MUTED}" font-size="11">'
