@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "resource.delete@1.0.0 args",
+  "reversibility": "COMPENSABLE",
+  "description": "Generic delete in any provisioned target. id accepts a real id or a human identifier. Reversal recreates the snapshot.",
+  "type": "object",
+  "required": ["target", "id"],
+  "additionalProperties": false,
+  "properties": {"target": {"type": "string"}, "id": {"type": "string"}}
+}

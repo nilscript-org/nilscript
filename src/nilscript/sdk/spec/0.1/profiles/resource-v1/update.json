@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "resource.update@1.0.0 args",
+  "reversibility": "COMPENSABLE",
+  "description": "Generic update of any provisioned target. id accepts a real record id or a human identifier (code/name) resolved server-side. Reversal restores the before-image.",
+  "type": "object",
+  "required": ["target", "id", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "target": {"type": "string", "description": "native target (collection/table/object)"},
+    "id": {"type": "string", "description": "record id or human identifier"},
+    "data": {"type": "object", "description": "fields to change"}
+  }
+}

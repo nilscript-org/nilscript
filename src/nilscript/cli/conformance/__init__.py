@@ -33,6 +33,8 @@ class ShimProbe(Protocol):
 
     def rollback(self, compensation_token: str, reason: str) -> dict[str, Any]: ...
 
+    def describe(self) -> dict[str, Any]: ...  # GET /nil/v0.1/describe — required for conformance
+
 
 @dataclass(frozen=True)
 class Check:
@@ -79,6 +81,18 @@ def run_conformance(
     (never a silent write), and an unknown token must never trigger a phantom reversal.
     """
     checks: list[Check] = []
+
+    # Row 0 — discovery handshake (MANDATORY): the shim must expose /nil/v0.1/describe with a valid
+    # skeleton — nil version, a verb catalog, and per native target {exists, fields}. This is how any
+    # client connects uniformly (reachable → conformant → provisioned) without backend specifics.
+    if hasattr(probe, "describe"):
+        d = probe.describe()
+        tgts = d.get("targets", {}) if isinstance(d, dict) else {}
+        ok = (isinstance(d, dict) and d.get("nil") == "0.1" and bool(d.get("verbs"))
+              and isinstance(tgts, dict)
+              and all(isinstance(v, dict) and "exists" in v and "fields" in v for v in tgts.values()))
+        checks.append(Check("exposes_describe_skeleton", ok,
+                            f"nil={d.get('nil')!r} verbs={len(d.get('verbs', []))} targets={len(tgts)}"))
 
     # Row 1 — valid PROPOSE previews (a proposal, not a refusal), and yields a proposal id.
     proposed = probe.propose(write_verb, write_args)

@@ -125,8 +125,12 @@ def render_translate(
 
     parts.append(
         "\n\ndef entity_ref(verb: WriteVerb, created: dict[str, Any]) -> dict[str, Any]:\n"
-        '    name = created.get("name", "")\n'
+        "    # The SSOT entity id MUST be the backend's real record key, so a compensating\n"
+        "    # update/delete (ROLLBACK) targets the record itself — never a human attribute that\n"
+        "    # can collide or change. Same precedence the generic resource.* path uses: id, then\n"
+        "    # name (Frappe-style backends whose primary key IS `name` fall through correctly).\n"
+        '    rid = created.get("id") or created.get("name") or ""\n'
         '    slug = verb.doctype.lower().replace(" ", "-")\n'
-        '    return {"type": verb.entity_type, "id": name, "url": f"/{slug}/{name}"}\n'
+        '    return {"type": verb.entity_type, "id": rid, "url": f"/{slug}/{rid}"}\n'
     )
     return "".join(parts)

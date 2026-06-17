@@ -171,6 +171,9 @@ class StatusBody(NilModel):
     # SEQRD-PC: a reversible/compensable executed write returns its compensation handle here
     # (e.g. {"reversibility": "REVERSIBLE", "token": "..."}) so a later ROLLBACK can reference it.
     compensation: dict[str, Any] | None = None
+    # The SSOT result of an executed write: the affected entity {type, id, name, url} and the
+    # system of record {system, read_after_write}. Surfaces the real backend result to the committer.
+    result: dict[str, Any] | None = None
 
 
 class Candidate(NilModel):

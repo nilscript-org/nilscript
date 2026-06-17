@@ -89,6 +89,20 @@ def test_write_verb_reaches_executed(verb_name: str) -> None:
     )
     state = committed.json().get("body", {{}}).get("state")
     assert state == "executed", f"{{verb_name}}: not conformant yet (state={{state}}) — fill translate.py"
+
+
+def test_describe_exposes_skeleton() -> None:
+    """MANDATORY: /nil/v0.1/describe exposes a valid skeleton — nil version, a verb catalog, and
+    per native target {{exists, fields}}. This is the universal connect handshake the kernel uses."""
+    client = TestClient(create_app(FakeSystem(), CapturingEmitter(), bearer=None), raise_server_exceptions=False)
+    d = client.get("/nil/v0.1/describe").json()
+    assert d.get("nil") == "0.1", "describe must report the NIL version"
+    assert d.get("verbs"), "describe must list the verb catalog"
+    targets = d.get("targets", {{}})
+    assert isinstance(targets, dict) and targets, "describe must report native targets"
+    for name, t in targets.items():
+        assert isinstance(t, dict) and "exists" in t and "fields" in t, f"{{name}}: target needs exists+fields"
+    assert all(t["exists"] for t in targets.values()), "FakeSystem targets are always provisioned"
 '''
 
 

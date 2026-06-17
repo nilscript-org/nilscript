@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "resource.read@1.0.0 args",
+  "description": "Generic QUERY (read-only) over any provisioned target, optionally filtered — resolves human values to records/ids in realtime.",
+  "type": "object",
+  "required": ["target"],
+  "additionalProperties": false,
+  "properties": {"target": {"type": "string"}, "match": {"type": "object"}}
+}

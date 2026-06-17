@@ -12,6 +12,24 @@ kernel. You fork the template, fill three files, prove conformance, and submit.
 See the architecture rationale in
 [`adapter-ecosystem-strategy.md`](./adapter-ecosystem-strategy.md).
 
+## 0.3.0 — what your adapter must expose
+
+Your `system.py` client implements the I/O **and** three discovery/CRUD primitives:
+
+- `exists(target) -> bool` and `schema(target) -> list[{name,type,required}] | None` — power
+  `GET /nil/v0.1/describe` (your *skeleton*) and the **PROPOSE preflight** (a write to a
+  missing target refuses with `UPSTREAM_UNAVAILABLE`, never a silent COMMIT failure).
+- `get(target, id) -> dict | None` — the *before-image* that makes **generic reversibility** work.
+
+In return the generic edge gives every adapter, for free:
+- **Discovery** — `describe` is the **mandatory** `exposes_describe_skeleton` conformance row.
+- **Generic `resource.*` CRUD** (`create/read/update/delete`) over any provisioned target, with
+  synthesized rollback (create→delete, update→restore, delete→recreate) and id-or-human-identifier
+  resolution. You only author *semantic* verbs (e.g. `commerce.create_product`) when they deserve
+  bespoke previews/compensation; everything else is covered generically.
+
+Unknown verbs refuse with `UNKNOWN_VERB`. Conforms to **nilscript ≥ 0.3.0**.
+
 ## The journey
 
 ```

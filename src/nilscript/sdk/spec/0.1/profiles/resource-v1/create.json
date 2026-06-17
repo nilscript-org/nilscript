@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "resource.create@1.0.0 args",
+  "reversibility": "REVERSIBLE",
+  "description": "Generic create in any provisioned target. Reversal deletes the created record.",
+  "type": "object",
+  "required": ["target", "data"],
+  "additionalProperties": false,
+  "properties": {"target": {"type": "string"}, "data": {"type": "object"}}
+}

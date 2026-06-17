@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -317,6 +318,9 @@ def _cmd_conformance_test(args: argparse.Namespace) -> int:
         return {"nil": "0.1", "grant": "g", "workspace": "w", "body": {"verb": verb, **extra}}
 
     class _HttpProbe:
+        def describe(self):
+            return http.get("/nil/v0.1/describe").json()
+
         def propose(self, verb, payload_args):
             return http.post("/nil/v0.1/propose", json=_env(verb, {"args": payload_args})).json()
 
@@ -354,6 +358,47 @@ def _cmd_conformance_test(args: argparse.Namespace) -> int:
     passed, total = summarize(checks)
     print(f"\n{passed}/{total} conformance checks passed", file=sys.stderr)
     return 0 if passed == total else 1
+
+
+def _find_demo_dir() -> Path | None:
+    """Locate the reference Playground's demo/ directory.
+
+    The demo ships alongside the source tree (repo_root/demo/), not inside the importable
+    package, so an editable/source checkout finds it by walking up from this module. An
+    explicit NILSCRIPT_DEMO_DIR override wins (e.g. a packaged or relocated install)."""
+    override = os.environ.get("NILSCRIPT_DEMO_DIR")
+    if override:
+        cand = Path(override)
+        return cand if (cand / "demo_ui.py").exists() else None
+    # cli/__init__.py -> cli -> nilscript -> src -> repo_root
+    for base in Path(__file__).resolve().parents:
+        cand = base / "demo"
+        if (cand / "demo_ui.py").exists():
+            return cand
+    return None
+
+
+def _cmd_demo(args: argparse.Namespace) -> int:
+    """Launch the reference Playground (demo/demo_ui.py) — needs `pip install nilscript[demo]`."""
+    demo_dir = _find_demo_dir()
+    if demo_dir is None:
+        print(
+            "demo/ not found. The Playground ships with the source tree; run from a checkout, "
+            "or set NILSCRIPT_DEMO_DIR to the directory containing demo_ui.py.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        import uvicorn  # noqa: F401
+    except ModuleNotFoundError:
+        print("the demo needs FastAPI + uvicorn + litellm (pip install nilscript[demo])", file=sys.stderr)
+        return 2
+
+    import subprocess
+
+    env = {**os.environ, "UI_PORT": str(args.port)}
+    print(f"launching the nilscript Playground at http://127.0.0.1:{args.port}  (demo/ = {demo_dir})", file=sys.stderr)
+    return subprocess.call([sys.executable, "demo_ui.py"], cwd=str(demo_dir), env=env)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -429,6 +474,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--context", help="optional validation-context JSON; validates before running")
     p_run.add_argument("--json", action="store_true", help="machine-readable execution trace")
     p_run.set_defaults(func=_cmd_run)
+
+    p_demo = sub.add_parser("demo", help="launch the reference Playground UI (needs nilscript[demo])")
+    p_demo.add_argument("--port", type=int, default=8770, help="port to serve the Playground on (default 8770)")
+    p_demo.set_defaults(func=_cmd_demo)
 
     return parser
 

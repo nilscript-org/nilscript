@@ -19,6 +19,17 @@
 
 ---
 
+## New in 0.3.0
+
+- **Discovery handshake** — every adapter exposes `GET /nil/v0.1/describe` returning its *skeleton*: `{nil, system, verbs, targets:{name:{exists, fields[]}}}`. The SDK `handshake(transport)` connects any client uniformly: **reachable → conformant → provisioned**.
+- **Mandatory conformance row** — `exposes_describe_skeleton` is now the first check; the matrix is 11 rows. A shim without a valid describe is non-conformant.
+- **PROPOSE preflight** — a verb whose native target isn't provisioned is **refused at PROPOSE** (`UPSTREAM_UNAVAILABLE`), not failed after COMMIT.
+- **Generic `resource.*` family** (`resource-v1` profiles) — `create / read / update / delete` over **any** target the skeleton exposes, with **no per-entity verb authoring**. `read` is a QUERY; writes ride PROPOSE→COMMIT.
+- **Synthesized reversibility** — generic writes are reversible with no per-verb mapping: create→delete, update→restore *before-image*, delete→recreate, all via the standard `ROLLBACK`.
+- **Identifier resolution** — `update`/`delete` accept a real id *or* a human identifier (code/name/…), resolved server-side.
+- **`STATUS.result`** — a COMMIT returns the SSOT result: `entity{type,id,url}` + `ssot{system,read_after_write}` + compensation handle.
+- **Adapter I/O interface** gained `exists(target)`, `schema(target)`, `get(target,id)`; `scaffold-shim` emits all of the above (skeleton-aware adapters by default).
+
 ## Why
 
 - **Every agent↔system integration is rebuilt from scratch.** NIL is the neutral wire contract, so you build an adapter *once*.
@@ -110,6 +121,24 @@ from nilscript.sdk import NilClient                  # only with [sdk]
 The standard is language-neutral JSON: a Go/TypeScript/Rust implementer reads the schemas in
 `src/nilscript/nil/` and `src/nilscript/dsl/` directly — no per-language package reserved (the
 OpenAPI / JSON-Schema model).
+
+## Benchmarks
+
+NIL is the layer between the agent and the backend, so we **instrument** established benchmarks and
+report a controlled A/B — same model, same attacks, **raw** vs **NIL-gated**. On the
+[InjecAgent](https://github.com/uiuc-kang-lab/InjecAgent) prompt-injection suite (ACL Findings 2024):
+
+![InjecAgent: unauthorized-write rate, raw vs NIL](bench/assets/injecagent_safety.svg)
+
+> Across **4,216 evaluations** (2 models × base+enhanced × 1,054 cases), agents were hijacked into an
+> unauthorized write 0–4.5% of the time; **through NIL those writes commit 0.00%**, while benign tasks
+> stay at **100%**. The result is model- and attack-independent — NIL's defense is structural
+> (propose→approve→commit), not a smarter model.
+
+Method, caveats, and the full plan (all four axes — task-success, safety, conformance, performance):
+[`docs/benchmarking-plan.md`](docs/benchmarking-plan.md) · harness + how to reproduce:
+[`bench/`](bench/). *(Single-step harness, not InjecAgent's two-step ReAct; ASRs are harness-specific
+— only the NIL→0 result is the comparable claim. See the plan's credibility notes.)*
 
 ## Where it stands
 

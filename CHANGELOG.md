@@ -1,12 +1,21 @@
 # Changelog
 
-## 0.3.0 — Unreleased
+## 0.3.0 — 2026-06-17
 **Bounded Reversibility — a 7th performative, ROLLBACK, added in place on the 0.1 wire.**
 Fully additive and backward-compatible: every existing 0.1 message, DSL program, and profile
 remains valid; the envelope `nil` const **stays "0.1"** (no new schema namespace). Any unmarked
 verb is IRREVERSIBLE by default (zero-touch). Package version `0.2.0 → 0.3.0`. The upgraded kernel
 is named **SEQRD-PC** — a mnemonic re-cut of the same set: S·STATUS, E·EVENT, Q·QUERY, R·ROLLBACK,
-D·DECIDE, P·PROPOSE, C·COMMIT. Full test suite green at 160.
+D·DECIDE, P·PROPOSE, C·COMMIT. Full test suite green at 180. Ships the reference Playground
+(`demo/`, `nilscript demo`) — the chat UI that drives a live shim through the SDK.
+### Added — discovery, generic CRUD & skeleton awareness
+- **Discovery:** `GET /nil/v0.1/describe` — adapters self-describe their *skeleton* `{nil, system, verbs, targets:{name:{exists, fields[]}}}`. SDK gains `handshake(transport)` (reachable → conformant → provisioned). Conformance gains a **mandatory** `exposes_describe_skeleton` row (matrix now 11).
+- **PROPOSE preflight:** a verb whose native target isn't provisioned is refused at PROPOSE (`UPSTREAM_UNAVAILABLE`) instead of a COMMIT-time `failed_terminal`.
+- **Generic `resource.*` family** (`resource-v1` profiles: create/read/update/delete) — universal CRUD over any provisioned target, no per-entity authoring. `read` = QUERY; writes = PROPOSE→COMMIT with **synthesized reversibility** (create→delete, update→restore before-image, delete→recreate) via `ROLLBACK`.
+- **Identifier resolution:** `update`/`delete` (generic and semantic) accept a real id or a human identifier (code/name/…) resolved server-side.
+- **`STATUS.result`:** COMMIT returns the SSOT result envelope (`entity`, `ssot`, `compensation`).
+- **Adapter I/O interface:** `exists(target)`, `schema(target)`, `get(target,id)`; `scaffold-shim` emits all of it (skeleton-aware by default) + a describe conformance test.
+- **Fix:** unknown verb now refuses with the valid `UNKNOWN_VERB` (was the invalid `UNSUPPORTED`).
 ### Added
 - **Wire:** `ROLLBACK` added to the envelope `performative` enum; new `rollback.schema.json`.
   EVENT `result` gains a `compensation` object `{reversibility, token?, expires_at?}`; new EVENT

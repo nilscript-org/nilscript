@@ -1,0 +1,39 @@
+name: parity
+
+# Release-plan §3 cross-repo gate: lays the kernel + the template + the reference adapter out in a
+# nizam-style tree and runs scripts/parity.sh. Proves the adapters' generic modules are still
+# byte-identical to the template (nobody hand-diverged the scaffold surface) and that the CLI /
+# conformance commands are truthful. The erpnext "behind 0.3.0" line is a warning, not a failure.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  parity:
+    name: ecosystem parity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          path: nizam/nilscript
+      - name: Checkout adapter template
+        uses: actions/checkout@v4
+        with:
+          repository: nilscript-org/nil-adapter-template
+          path: nizam/adapters/nil-adapter-template
+      - name: Checkout reference adapter
+        uses: actions/checkout@v4
+        with:
+          repository: nilscript-org/pocketbase-nil-adapter
+          path: nizam/adapters/pocketbase-nil-adapter
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps (kernel dev extra covers pytest/httpx/fastapi/pydantic)
+        run: pip install -e "nizam/nilscript[dev]"
+      - name: Run the parity audit
+        run: PY=python bash nizam/nilscript/scripts/parity.sh

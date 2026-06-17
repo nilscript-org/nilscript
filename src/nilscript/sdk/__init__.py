@@ -7,6 +7,7 @@ backend. It is imported only when nilscript is installed with the ``[sdk]`` extr
 
 from nilscript.sdk.bootstrap import client_for_grant, client_from_env
 from nilscript.sdk.client import NilClient
+from nilscript.sdk.connect import handshake
 from nilscript.sdk.grants import GrantRef, scope_allows
 from nilscript.sdk.refusals import RefusalCode
 from nilscript.sdk.transport import NilTransport
@@ -23,4 +24,5 @@ __all__ = [
     "RefusalCode",
     "client_from_env",
     "client_for_grant",
+    "handshake",
 ]

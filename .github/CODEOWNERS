@@ -1,11 +1,7 @@
-# The Steward holds final merge authority on normative text (GOVERNANCE.md).
-# Normative surfaces require Steward review.
-
-# Default
-*                               @nilscript-org/maintainers
-
-# Normative spec — Steward review required
-/src/nilscript/nil/             @nilscript-org/stewards
-/src/nilscript/dsl/             @nilscript-org/stewards
-/GOVERNANCE.md                  @nilscript-org/stewards
-/VERSIONING.md                  @nilscript-org/stewards
+# The kernel is the single source of truth for the standard data, SDK, and CLI.
+# Conformance + parity gates must pass before merge (see .github/workflows/).
+*                       @nilscript-org/maintainers
+/src/nilscript/sdk/     @nilscript-org/maintainers
+/src/nilscript/cli/     @nilscript-org/maintainers
+/src/nilscript/nil/     @nilscript-org/maintainers
+/scripts/parity.sh      @nilscript-org/maintainers
