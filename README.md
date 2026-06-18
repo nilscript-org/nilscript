@@ -62,6 +62,16 @@ the backend. The agent can only *propose*; nothing happens to your data until a 
 operations your backend has actually declared — anything else is **refused, not faked**. You build the
 adapter **once**, and any NIL-speaking agent works against it.
 
+## See it in action
+
+A ~10s walkthrough of the Reference Playground: an agent chats to a live backend and you watch a write
+go **propose → approve → commit → rollback** in a real trace — nothing touches the data until you say so.
+
+https://github.com/nilscript-org/nilscript/raw/main/Demo.mp4
+
+> Video not playing inline? [Download / view Demo.mp4](Demo.mp4). Try it yourself:
+> `pip install nilscript[demo] && nilscript demo`.
+
 ## Why this exists
 
 | The problem | What NIL does |
