@@ -95,8 +95,8 @@ https://github.com/user-attachments/assets/21ecd97b-5914-4618-b7ca-5f80d0a76467
 ## Quickstart
 
 ```bash
-# the latest 0.3.0 from source until it ships on PyPI:
-pip install "nilscript[cli] @ git+https://github.com/nilscript-org/nilscript.git"
+# 0.3.0 is on PyPI:
+pip install "nilscript[cli]"
 
 nilscript verbs                                  # the verb catalog from the standard
 nilscript scaffold-shim --name my-nil-adapter    # a bootable shim skeleton for any backend
