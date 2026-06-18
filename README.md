@@ -67,10 +67,9 @@ adapter **once**, and any NIL-speaking agent works against it.
 A ~10s walkthrough of the Reference Playground: an agent chats to a live backend and you watch a write
 go **propose → approve → commit → rollback** in a real trace — nothing touches the data until you say so.
 
-https://github.com/nilscript-org/nilscript/raw/main/Demo.mp4
+https://github.com/user-attachments/assets/21ecd97b-5914-4618-b7ca-5f80d0a76467
 
-> Video not playing inline? [Download / view Demo.mp4](Demo.mp4). Try it yourself:
-> `pip install nilscript[demo] && nilscript demo`.
+> Prefer to run it yourself? `pip install nilscript[demo] && nilscript demo`.
 
 ## Why this exists
 
