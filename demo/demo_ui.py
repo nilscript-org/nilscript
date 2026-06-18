@@ -1271,7 +1271,11 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("UI_PORT", "8770"))
+    # Bind host is configurable so the hosted/containerised playground can listen on
+    # all interfaces (0.0.0.0) for the reverse proxy to reach it. Default stays on
+    # loopback so the local `nilscript demo` is not exposed beyond the machine.
+    host = os.environ.get("UI_HOST", "127.0.0.1")
     print("nilscript demo UI — starting kernel shims…")
     launch_shims()
     print(f"\n  ➜  open  http://127.0.0.1:{port}\n")
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
