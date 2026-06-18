@@ -2,6 +2,8 @@
 
 # NILScript
 
+<img src="assets/nil-logo.png" alt="&lt;nil&gt;" width="140" />
+
 ### Give an AI agent real power over your systems — and take on zero risk doing it.
 
 **NIL (the Network Intent Layer) is the neutral standard for how agents *act* in real backends:**
