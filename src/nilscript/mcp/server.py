@@ -23,6 +23,7 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from nilscript.mcp.skill import SKILL_URI, skill_body, skill_meta
+from nilscript.mcp.tenant import Tenant, resolve_tenant
 from nilscript.mcp.tools import NilTools, session_key
 from nilscript.sdk.client import NilClient
 from nilscript.sdk.grants import GrantRef
@@ -66,6 +67,66 @@ def build_tools(
     return NilTools(client, transport, session_id=session_id, gate=gate)
 
 
+class ToolsProvider:
+    """Resolves the `NilTools` (the backend) for a given MCP connection.
+
+    Single-tenant returns one shared instance for every connection (today's behavior). Multi-tenant
+    returns a per-connection instance bound to the backend the agent supplied via `X-NIL-*` headers.
+    """
+
+    def get(self, ctx: Any) -> NilTools:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+class SingletonToolsProvider(ToolsProvider):
+    """One shared backend for all connections (per-connection proposal isolation still applies via
+    `session_id=session_key(ctx)` inside the tool calls)."""
+
+    def __init__(self, tools: NilTools) -> None:
+        self._tools = tools
+
+    def get(self, ctx: Any) -> NilTools:
+        return self._tools
+
+
+class TenantToolsProvider(ToolsProvider):
+    """Per-connection backend binding (multi-tenant). Builds and caches one `NilTools` per connection,
+    pointed at the adapter the agent named in its `X-NIL-Adapter-Url` header. The kernel never holds
+    the tenant's backend credentials — those live in the tenant's adapter; we only relay to it."""
+
+    def __init__(
+        self,
+        *,
+        default: Tenant | None = None,
+        allow_insecure: bool = False,
+        gate: str = "two-step",
+    ) -> None:
+        self._default = default
+        self._allow_insecure = allow_insecure
+        self._gate = gate
+        self._cache: dict[str, NilTools] = {}
+
+    def get(self, ctx: Any) -> NilTools:
+        key = session_key(ctx)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        tenant = resolve_tenant(
+            ctx, default=self._default, multi_tenant=True, allow_insecure=self._allow_insecure
+        )
+        tools = build_tools(
+            adapter_url=tenant.adapter_url,
+            bearer=tenant.bearer,
+            grant_id=tenant.grant_id,
+            workspace=tenant.workspace,
+            scopes=tenant.scopes,
+            session_id=key,
+            gate=self._gate,
+        )
+        self._cache[key] = tools
+        return tools
+
+
 def build_server(
     tools: NilTools,
     *,
@@ -73,15 +134,20 @@ def build_server(
     dynamic_verbs: list[str] | None = None,
     host: str = "127.0.0.1",
     port: int = 8765,
+    tools_provider: ToolsProvider | None = None,
 ):  # type: ignore[no-untyped-def]
     """Bind the NilTools surface onto a FastMCP server. Imports `mcp` lazily.
 
     `dynamic_verbs` (the live skeleton) adds one `propose_<verb>` tool per exposed verb. `host`/
     `port` apply to the HTTP transports. The `using-nilscript` skill is served as a resource + prompt.
+    `tools_provider` (optional) resolves the backend per connection — pass a `TenantToolsProvider`
+    for multi-tenant; default wraps `tools` in a `SingletonToolsProvider` (one shared backend). The
+    skill/skeleton resources and any `dynamic_verbs` always reflect the `tools` backend (the default).
     """
     server = FastMCP(name, instructions=_INSTRUCTIONS, host=host, port=port)
 
-    _register_tools(server, tools)
+    provider = tools_provider if tools_provider is not None else SingletonToolsProvider(tools)
+    _register_tools(server, provider)
     if dynamic_verbs:
         from nilscript.mcp.dynamic import register_dynamic_tools
 
@@ -90,29 +156,30 @@ def build_server(
     return server
 
 
-def _register_tools(server: Any, tools: NilTools) -> None:
-    """Wrap each primitive with the MCP Context so per-connection session isolation applies (the
-    server fronts ONE adapter, but many agents may connect — each gets its own proposal/idempotency
-    session via `session_key(ctx)`). The `ctx` param is injected by FastMCP and hidden from the schema.
+def _register_tools(server: Any, provider: ToolsProvider) -> None:
+    """Wrap each primitive with the MCP Context so the backend + per-connection session resolve from
+    the connection: `provider.get(ctx)` picks the backend (one shared, or per-tenant from headers)
+    and `session_key(ctx)` isolates each connection's proposal/idempotency session. `ctx` is injected
+    by FastMCP and hidden from the schema.
     """
 
     async def nil_describe(ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
-        return await tools.describe()
+        return await provider.get(ctx).describe()
 
     async def nil_propose(verb: str, args: dict[str, Any] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
-        return await tools.propose(verb, args, session_id=session_key(ctx))
+        return await provider.get(ctx).propose(verb, args, session_id=session_key(ctx))
 
     async def nil_commit(proposal_id: str, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
-        return await tools.commit(proposal_id, session_id=session_key(ctx))
+        return await provider.get(ctx).commit(proposal_id, session_id=session_key(ctx))
 
     async def nil_query(verb: str, args: dict[str, Any] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
-        return await tools.query(verb, args)
+        return await provider.get(ctx).query(verb, args)
 
     async def nil_status(proposal_id: str, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
-        return await tools.status(proposal_id)
+        return await provider.get(ctx).status(proposal_id)
 
     async def nil_rollback(compensation_token: str, reason: str, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
-        return await tools.rollback(compensation_token, reason, session_id=session_key(ctx))
+        return await provider.get(ctx).rollback(compensation_token, reason, session_id=session_key(ctx))
 
     server.add_tool(
         nil_describe, name="nil_describe",
@@ -284,10 +351,19 @@ def build_asgi_app(
     gate: str = "two-step",
     dynamic_tools: bool = True,
     auth_token: str | None = None,
+    multi_tenant: bool = False,
+    allow_insecure: bool = False,
 ):  # type: ignore[no-untyped-def]
     """Return a streamable-HTTP ASGI app for production hosting (uvicorn/gunicorn behind nilscript.org).
 
-    The skeleton is discovered once at build time so per-verb tools reflect the mounted adapter.
+    Single-tenant (default): the skeleton is discovered once at build time so per-verb tools reflect
+    the mounted adapter, and all connections share that backend.
+
+    `multi_tenant=True`: each connection links its OWN backend via `X-NIL-Adapter-Url` (+ optional
+    `X-NIL-Adapter-Bearer`/`X-NIL-Grant-Id`/`X-NIL-Workspace`/`X-NIL-Scopes`) headers; the env
+    `adapter_url` becomes the fallback default for header-less connections. Per-verb dynamic tools are
+    disabled in this mode (the skeleton differs per tenant) — agents call `nil_describe` instead.
+
     `auth_token` (if set) is a static front-door bearer required on /mcp — without it a public URL is
     open to anyone who can reach it (the NIL gate still bounds writes, but a connected agent can
     commit in-scope). `/healthz` stays open for load-balancer probes.
@@ -295,13 +371,20 @@ def build_asgi_app(
     import asyncio
 
     verbs: list[str] = []
-    if dynamic_tools:
+    if dynamic_tools and not multi_tenant:
         verbs = asyncio.run(_discover_verbs(adapter_url, bearer))
     tools = build_tools(
         adapter_url=adapter_url, grant_id=grant_id, workspace=workspace,
         bearer=bearer, scopes=scopes, gate=gate,
     )
-    server = build_server(tools, dynamic_verbs=verbs)
+    provider: ToolsProvider | None = None
+    if multi_tenant:
+        default = Tenant(
+            adapter_url=adapter_url, bearer=bearer, grant_id=grant_id,
+            workspace=workspace, scopes=scopes,
+        )
+        provider = TenantToolsProvider(default=default, allow_insecure=allow_insecure, gate=gate)
+    server = build_server(tools, dynamic_verbs=verbs, tools_provider=provider)
     app = server.streamable_http_app()  # MCP mounted at /mcp
 
     # A plain health route for load balancers / readiness probes (not part of MCP).

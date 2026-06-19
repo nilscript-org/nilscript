@@ -36,6 +36,10 @@ def create_app():  # type: ignore[no-untyped-def]
         # Front-door bearer for the /mcp endpoint. STRONGLY recommended for a public URL: without it
         # anyone who can reach the URL can drive the backend (within the grant). /healthz stays open.
         auth_token=os.environ.get("NIL_MCP_AUTH_TOKEN") or None,
+        # Multi-tenant: each connection links its own backend via X-NIL-Adapter-Url headers; the
+        # NIL_ADAPTER_URL above becomes the fallback for header-less connections.
+        multi_tenant=os.environ.get("NIL_MCP_MULTI_TENANT", "0") != "0",
+        allow_insecure=os.environ.get("NIL_ALLOW_INSECURE", "0") != "0",
     )
 
 
