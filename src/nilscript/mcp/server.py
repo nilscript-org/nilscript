@@ -17,8 +17,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
+# Imported at module scope (not lazily) so the wrapped tool functions' stringized annotations
+# (PEP 563) resolve via get_type_hints — FastMCP injects `ctx: Context` and hides it from the schema.
+# This makes importing nilscript.mcp.server require the [mcp] extra (callers catch ModuleNotFoundError).
+from mcp.server.fastmcp import Context, FastMCP
+
 from nilscript.mcp.skill import SKILL_URI, skill_body, skill_meta
-from nilscript.mcp.tools import NilTools
+from nilscript.mcp.tools import NilTools, session_key
 from nilscript.sdk.client import NilClient
 from nilscript.sdk.grants import GrantRef
 from nilscript.sdk.transport import NilTransport
@@ -74,8 +79,6 @@ def build_server(
     `dynamic_verbs` (the live skeleton) adds one `propose_<verb>` tool per exposed verb. `host`/
     `port` apply to the HTTP transports. The `using-nilscript` skill is served as a resource + prompt.
     """
-    from mcp.server.fastmcp import FastMCP
-
     server = FastMCP(name, instructions=_INSTRUCTIONS, host=host, port=port)
 
     _register_tools(server, tools)
@@ -88,30 +91,53 @@ def build_server(
 
 
 def _register_tools(server: Any, tools: NilTools) -> None:
+    """Wrap each primitive with the MCP Context so per-connection session isolation applies (the
+    server fronts ONE adapter, but many agents may connect — each gets its own proposal/idempotency
+    session via `session_key(ctx)`). The `ctx` param is injected by FastMCP and hidden from the schema.
+    """
+
+    async def nil_describe(ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+        return await tools.describe()
+
+    async def nil_propose(verb: str, args: dict[str, Any] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+        return await tools.propose(verb, args, session_id=session_key(ctx))
+
+    async def nil_commit(proposal_id: str, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+        return await tools.commit(proposal_id, session_id=session_key(ctx))
+
+    async def nil_query(verb: str, args: dict[str, Any] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+        return await tools.query(verb, args)
+
+    async def nil_status(proposal_id: str, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+        return await tools.status(proposal_id)
+
+    async def nil_rollback(compensation_token: str, reason: str, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+        return await tools.rollback(compensation_token, reason, session_id=session_key(ctx))
+
     server.add_tool(
-        tools.describe, name="nil_describe",
+        nil_describe, name="nil_describe",
         description="Discover the backend skeleton: the verbs and targets it actually exposes. No side effect.",
     )
     server.add_tool(
-        tools.propose, name="nil_propose",
+        nil_propose, name="nil_propose",
         description="Preview an intent (verb + args). NO side effect: returns a human-readable preview "
         "with a reversibility tier, or a structured refusal. Always call this before nil_commit.",
     )
     server.add_tool(
-        tools.commit, name="nil_commit",
+        nil_commit, name="nil_commit",
         description="Execute a previously previewed proposal by its id. This is the ONLY tool that writes. "
         "Idempotent: re-committing the same proposal replays, it never double-writes.",
     )
     server.add_tool(
-        tools.query, name="nil_query",
+        nil_query, name="nil_query",
         description="Read live business truth (verb + args). No side effect.",
     )
     server.add_tool(
-        tools.status, name="nil_status",
+        nil_status, name="nil_status",
         description="Get the status/result of a proposal by id, including its compensation handle.",
     )
     server.add_tool(
-        tools.rollback, name="nil_rollback",
+        nil_rollback, name="nil_rollback",
         description="Request a governed reversal of a committed effect (compensation_token + reason: "
         "saga_unwind|owner_cancel|downstream_failed|agent_repair). Previews a compensation to commit, "
         "or refuses honestly (IRREVERSIBLE / COMPENSATION_EXPIRED). No silent write.",

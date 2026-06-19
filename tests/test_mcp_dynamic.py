@@ -43,6 +43,19 @@ def test_describe_verb_surfaces_required_args() -> None:
     assert "required:" in desc and "name" in desc
 
 
+async def test_dynamic_tool_carries_rich_profile_schema() -> None:
+    from mcp.server.fastmcp import FastMCP
+
+    server = FastMCP("t")
+    register_dynamic_tools(server, _tools(), ["commerce.create_product"])
+    tool = {t.name: t for t in await server.list_tools()}["propose_commerce_create_product"]
+    schema = tool.inputSchema
+    props = schema.get("properties", {})
+    assert "name" in props  # a real per-verb field, not an opaque `args` blob
+    assert "name" in schema.get("required", [])
+    assert "ctx" not in props  # the injected Context never leaks into the schema
+
+
 async def test_register_is_bounded_to_skeleton_verbs() -> None:
     from mcp.server.fastmcp import FastMCP
 

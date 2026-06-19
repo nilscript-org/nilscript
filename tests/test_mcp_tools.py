@@ -144,6 +144,27 @@ async def test_gate_human_holds_high_tier_commit() -> None:
 
 
 @respx.mock
+async def test_human_gate_is_per_connection() -> None:
+    # Multi-tenant: tier memory is keyed by session, so two agents on one server don't collide.
+    respx.post(f"{BASE}/nil/v0.1/propose").mock(
+        return_value=httpx.Response(200, json=server_envelope("PROPOSAL", PROPOSAL_OK))
+    )
+    respx.post(f"{BASE}/nil/v0.1/commit").mock(
+        return_value=httpx.Response(
+            200, json=server_envelope("STATUS", {"proposal": "prop-0001", "state": "executed"})
+        )
+    )
+    tools, _ = make_tools(gate="human")
+    # Agent A proposes the HIGH-tier write → A's commit is held.
+    await tools.propose("commerce.create_product", {"name": "A"}, session_id="agentA")
+    a = await tools.commit("prop-0001", session_id="agentA")
+    assert a["committed"] is False and a["outcome"] == "approval_required"
+    # Agent B never proposed it → no tier memory under B → isolated from A's gate.
+    b = await tools.commit("prop-0001", session_id="agentB")
+    assert b["committed"] is True
+
+
+@respx.mock
 async def test_rollback_previews_compensation() -> None:
     respx.post(f"{BASE}/nil/v0.1/rollback").mock(
         return_value=httpx.Response(
