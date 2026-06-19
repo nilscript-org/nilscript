@@ -8,6 +8,11 @@ travels with the server (an MCP resource + prompt), so the agent learns the disc
 
 Two transports: **stdio** (local IDE clients) and **streamable-HTTP** (remote, e.g. nilscript.org).
 
+> **On Linux?** There is no official Claude Desktop for Linux. Use the **remote** setup (§B) with a
+> **claude.ai Custom Connector**, or a local MCP client that runs on Linux — **Claude Code**
+> (`claude mcp add nilscript -- nilscript mcp --adapter-url <shim>`), Cursor, Cline, Zed, or Goose
+> — which all use the same stdio command in §A.
+
 ---
 
 ## A. Local — Claude Desktop / Cursor (stdio), 3 steps
@@ -57,13 +62,21 @@ nilscript mcp --adapter-url https://your-adapter \
   --grant-secret-env NIL_GRANT_SECRET --transport streamable-http --host 0.0.0.0 --port 8765
 ```
 
-Put it behind TLS at a stable URL (e.g. `https://nilscript.org/mcp`) and add it in the client as a
-**Custom Connector / remote MCP server**. Container image: [`deploy/Dockerfile.mcp`](../deploy/Dockerfile.mcp).
+Put it behind TLS at a stable URL (e.g. `https://nilscript.org/mcp`). Container image:
+[`deploy/Dockerfile.mcp`](../deploy/Dockerfile.mcp).
 
 ```bash
 docker build -f deploy/Dockerfile.mcp -t nilscript-mcp .
 docker run -e NIL_ADAPTER_URL=https://your-adapter -e NIL_GRANT_SECRET=… -p 8765:8765 nilscript-mcp
 ```
+
+**Readiness probe:** `GET /healthz` → `200 {"status":"ok",…}` when the adapter is reachable +
+conformant, else `503`. Point your load balancer / orchestrator at it.
+
+**Add it in Claude (claude.ai):** Settings → **Connectors** → **Add custom connector** → URL
+`https://nilscript.org/mcp`. (Custom Connectors are on paid plans.) The agent then sees the `nil_*`
+tools + `propose_<verb>` per exposed verb, and can load the `using_nilscript` prompt. The server is
+multi-tenant by connection: many agents share the one adapter without seeing each other's proposals.
 
 ---
 
