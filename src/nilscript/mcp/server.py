@@ -283,4 +283,25 @@ def build_asgi_app(
         bearer=bearer, scopes=scopes, gate=gate,
     )
     server = build_server(tools, dynamic_verbs=verbs)
-    return server.streamable_http_app()
+    app = server.streamable_http_app()  # MCP mounted at /mcp
+
+    # A plain health route for load balancers / readiness probes (not part of MCP).
+    from starlette.responses import JSONResponse
+
+    from nilscript.sdk.connect import handshake
+
+    async def _healthz(_request):  # type: ignore[no-untyped-def]
+        transport = NilTransport(base_url=adapter_url, bearer_secret=bearer)
+        try:
+            skeleton = await handshake(transport)
+        finally:
+            await transport.aclose()
+        ok = bool(skeleton.get("reachable") and skeleton.get("conformant"))
+        return JSONResponse(
+            {"status": "ok" if ok else "degraded", "adapter": adapter_url,
+             "reachable": skeleton.get("reachable"), "verbs": len(skeleton.get("verbs", []))},
+            status_code=200 if ok else 503,
+        )
+
+    app.add_route("/healthz", _healthz, methods=["GET"])
+    return app
