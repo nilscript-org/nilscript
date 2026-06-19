@@ -17,16 +17,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout kernel
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: nizam/nilscript
       - name: Checkout adapter template
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: nilscript-org/nil-adapter-template
           path: nizam/adapters/nil-adapter-template
       - name: Checkout reference adapter
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: nilscript-org/pocketbase-nil-adapter
           path: nizam/adapters/pocketbase-nil-adapter
