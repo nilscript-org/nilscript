@@ -35,17 +35,19 @@ def test_ingest_stores_and_recent_reads_newest_first() -> None:
     assert s.count() == 2
 
 
-def test_ingest_dedups_by_workspace_sequence() -> None:
+def test_ingest_dedups_by_event_id() -> None:
     s = _store()
     assert s.ingest(_event(1), 7) is True
-    assert s.ingest(_event(1), 7) is False  # same (ws, seq) → no-op
+    assert s.ingest(_event(1), 7) is False  # same envelope id → no-op (at-least-once retry)
     assert s.count() == 1
 
 
-def test_same_sequence_different_workspace_not_a_dup() -> None:
+def test_same_sequence_different_event_id_not_a_dup() -> None:
+    # The adapter resets its in-memory sequence on restart, so two distinct events can share a
+    # (workspace, sequence) — they must NOT be deduped. Distinct envelope ids keep them apart.
     s = _store()
-    assert s.ingest(_event(1, ws="a"), 5) is True
-    assert s.ingest(_event(1, ws="b"), 5) is True
+    assert s.ingest(_event(1, proposal="a"), 5) is True
+    assert s.ingest(_event(2, proposal="b"), 5) is True  # same seq=5, different id → stored
     assert s.count() == 2
 
 
