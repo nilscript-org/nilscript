@@ -690,6 +690,29 @@ async def meta():
             "verbs": sorted(VERBS)}
 
 
+@app.get("/api/mcp")
+async def mcp_connect(target: str = "memory"):
+    """The MCP connection recipe for this demo's shim: stdio config + remote URL + a live handshake.
+
+    Point Claude/Cursor at `nilscript mcp --adapter-url <this shim>` and the agent drives the same
+    backend you see in the Playground — through the NIL gate, so it physically cannot write unbidden.
+    """
+    if target not in TARGETS:
+        return JSONResponse({"error": f"unknown target {target!r}"}, status_code=400)
+    adapter_url = TARGETS[target]["url"]
+    skeleton = await connect_checks(target)  # reuses the demo's reachable→conformant→ready checks
+    try:
+        from nilscript.mcp.server import connection_info
+        recipe = connection_info(adapter_url=adapter_url, transport="stdio")
+    except ModuleNotFoundError:
+        recipe = {
+            "error": "MCP extra not installed",
+            "install": "pip install nilscript[mcp]",
+            "stdio": {"command": f"nilscript mcp --adapter-url {adapter_url}"},
+        }
+    return {"target": target, "adapter_url": adapter_url, "recipe": recipe, "handshake": skeleton}
+
+
 @app.get("/api/providers")
 async def providers():
     """The scroll-through catalog: every provider LiteLLM knows + its chat models."""

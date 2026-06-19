@@ -22,8 +22,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Install (dev extra)
-        run: pip install -e ".[dev]"
+      - name: Install (dev + demo extras)
+        # [dev] pulls the MCP SDK; [demo] adds uvicorn so the MCP stdio↔shim e2e runs (not skipped).
+        run: pip install -e ".[dev,demo]"
       - name: Run the suite
         run: pytest -q
 

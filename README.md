@@ -124,6 +124,23 @@ cd my-nil-adapter && pip install -e ".[dev]" && pytest   # red until you fill 3 
 | `nilscript conformance-test --url <shim> --verb <v>` | Run the conformance matrix against a live shim. |
 | `nilscript demo` | Launch the reference Playground (needs `nilscript[demo]`). |
 
+## Connect an agent (MCP)
+
+`nilscript mcp` is one generic MCP server: **any MCP-compatible agent connects once and drives any
+NIL adapter** through governed propose→approve→commit→rollback — and the `using-nilscript` skill
+travels with it (an MCP prompt + resource), so the agent learns the discipline on connect.
+
+```bash
+pip install "nilscript[mcp]"
+nilscript mcp --adapter-url http://127.0.0.1:8099   # point Claude Desktop / Cursor at it (stdio)
+# remote (e.g. nilscript.org): uvicorn nilscript.mcp.app:app  →  https://<host>/mcp
+```
+
+The agent gets `nil_describe / nil_propose / nil_commit / nil_query / nil_status / nil_rollback`
+plus a `propose_<verb>` per **exposed** verb (the tool list *is* the skeleton — a hallucinated verb
+isn't even on the menu). Only `nil_commit` writes, and only an approved proposal commits.
+Full steps (Claude Desktop config + remote connector): **[docs/connect-claude.md](docs/connect-claude.md)**.
+
 ## How it works
 
 NIL separates the **neutral intent layer** from **backend reality**. An agent speaks NIL to a thin

@@ -433,8 +433,50 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         scopes=scopes,
         gate=args.gate,
         transport=args.transport,
+        host=args.host,
+        port=args.port,
         dynamic_tools=not args.no_dynamic_tools,
     )
+    return 0
+
+
+def _cmd_mcp_info(args: argparse.Namespace) -> int:
+    """Print a copy-pasteable MCP connection recipe (stdio config + remote URL) + a live handshake."""
+    try:
+        from nilscript.mcp.server import connection_info
+        from nilscript.sdk.connect import handshake
+        from nilscript.sdk.transport import NilTransport
+    except ModuleNotFoundError:
+        print("needs the SDK + MCP extras (pip install nilscript[mcp])", file=sys.stderr)
+        return 2
+
+    import asyncio
+
+    bearer = os.environ.get(args.grant_secret_env, "") if args.grant_secret_env else (args.bearer or "")
+
+    async def _probe() -> dict:
+        transport = NilTransport(base_url=args.adapter_url, bearer_secret=bearer)
+        try:
+            return await handshake(transport)
+        finally:
+            await transport.aclose()
+
+    skeleton = asyncio.run(_probe())
+    info = connection_info(
+        adapter_url=args.adapter_url,
+        transport=args.transport,
+        host=args.host,
+        port=args.port,
+        public_url=args.public_url,
+    )
+    info["handshake"] = {
+        "reachable": skeleton.get("reachable"),
+        "conformant": skeleton.get("conformant"),
+        "system": skeleton.get("system"),
+        "verbs": skeleton.get("verbs", []),
+        "ready": skeleton.get("ready", []),
+    }
+    print(json.dumps(info, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -539,14 +581,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--transport",
         choices=["stdio", "sse", "streamable-http"],
         default="stdio",
-        help="MCP transport (default stdio)",
+        help="MCP transport (default stdio; streamable-http for a remote URL)",
     )
+    p_mcp.add_argument("--host", default="127.0.0.1", help="bind host for HTTP transports")
+    p_mcp.add_argument("--port", type=int, default=8765, help="bind port for HTTP transports")
     p_mcp.add_argument(
         "--no-dynamic-tools",
         action="store_true",
         help="register only the six generic primitives (skip per-verb propose_<verb> tools)",
     )
     p_mcp.set_defaults(func=_cmd_mcp)
+
+    p_mcpi = sub.add_parser(
+        "mcp-info",
+        help="print an MCP connection recipe (stdio config + remote URL) and a live handshake",
+    )
+    p_mcpi.add_argument("--adapter-url", required=True, help="base URL of a running NIL shim")
+    p_mcpi.add_argument("--grant-secret-env", help="env var holding the bearer secret")
+    p_mcpi.add_argument("--bearer", help="bearer token if the shim requires auth")
+    p_mcpi.add_argument(
+        "--transport", choices=["stdio", "sse", "streamable-http"], default="stdio",
+        help="transport to describe in the recipe",
+    )
+    p_mcpi.add_argument("--host", default="127.0.0.1", help="host for the remote URL")
+    p_mcpi.add_argument("--port", type=int, default=8765, help="port for the remote URL")
+    p_mcpi.add_argument("--public-url", help="public MCP URL (e.g. https://nilscript.org/mcp)")
+    p_mcpi.set_defaults(func=_cmd_mcp_info)
 
     return parser
 
