@@ -1224,6 +1224,7 @@ HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
  <button class=ghost id=history>History</button>
  <button class=ghost id=backend>Backend</button>
  <button class=ghost id=gear>Provider</button>
+ <a id=cplink href="https://cp.nilscript.org" target=_blank rel=noopener title="Open the Control Plane — every action + the adapters you've linked, in one live pane" style="text-decoration:none;display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border-radius:9px;font:inherit;font-size:13px;font-weight:600;color:#fff;background:linear-gradient(180deg,#6d5bff,#5a45df);border:1px solid #7d6dff;box-shadow:0 3px 12px -4px rgba(109,91,255,.7)">◉ Control&nbsp;Plane <span style=font-size:11px;opacity:.85>↗</span></a>
  <button class=ghost id=theme title="toggle light/dark">☾</button>
 </header>
 <div id=split>
@@ -1257,21 +1258,30 @@ HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
    </div>
 
    <div id=panel-backend class="panel pad" hidden>
-    <p class=ptext>Link the <b>live PocketBase</b>. The demo purges hourly — re-link here, or point at your own instance. A <code>products</code> collection is created if missing.</p>
-    <label>PocketBase URL</label><input id=b_url placeholder="https://pocketbase.io">
-    <label>Superuser identity <span class=dim>(email / username / id)</span></label><input id=b_identity placeholder="test@example.com or KT45bzNA340Xa7L">
-    <label>Password</label><input id=b_pass type=password placeholder="123456 (blank = keep current)">
-    <div id=b_status class=kv style="margin-top:12px"></div>
-    <div class=row style=margin-top:14px><button id=b_save>Link &amp; reconnect</button></div>
+    <p class=ptext id=b_intro>Settings for the backend selected above — each adapter shows only its own keys.</p>
 
-    <hr style="border:none;border-top:1px solid var(--line);margin:20px 0 16px">
-    <p class=ptext>Or link <b>live Odoo CRM</b> — your own keys, used only this session (never stored). After linking, pick <b>live Odoo CRM</b> in the backend selector. Any future adapter links the same way.</p>
-    <label>Odoo URL</label><input id=o_url placeholder="https://yourco.odoo.com">
-    <label>Database</label><input id=o_db placeholder="yourco">
-    <label>Login <span class=dim>(email)</span></label><input id=o_login placeholder="you@example.com">
-    <label>API key <span class=dim>(Settings → Users → API Keys)</span></label><input id=o_key type=password placeholder="blank = keep current">
-    <div id=o_status class=kv style="margin-top:12px"></div>
-    <div class=row style=margin-top:14px><button id=o_save>Link Odoo &amp; reconnect</button></div>
+    <div class=bform data-for=memory>
+     <p class=ptext><b>In-memory sandbox</b> — no credentials needed. Pick <b>live PocketBase</b> or <b>live Odoo CRM</b> in the selector above to link real keys.</p>
+    </div>
+
+    <div class=bform data-for=live>
+     <p class=ptext>Link the <b>live PocketBase</b>. The demo purges hourly — re-link here, or point at your own instance. A <code>products</code> collection is created if missing.</p>
+     <label>PocketBase URL</label><input id=b_url placeholder="https://pocketbase.io">
+     <label>Superuser identity <span class=dim>(email / username / id)</span></label><input id=b_identity placeholder="test@example.com or KT45bzNA340Xa7L">
+     <label>Password</label><input id=b_pass type=password placeholder="123456 (blank = keep current)">
+     <div id=b_status class=kv style="margin-top:12px"></div>
+     <div class=row style=margin-top:14px><button id=b_save>Link &amp; reconnect</button></div>
+    </div>
+
+    <div class=bform data-for=odoo>
+     <p class=ptext>Link <b>live Odoo CRM</b> — your own keys, used only this session (never stored). Any future adapter links the same way.</p>
+     <label>Odoo URL</label><input id=o_url placeholder="https://yourco.odoo.com">
+     <label>Database</label><input id=o_db placeholder="yourco">
+     <label>Login <span class=dim>(email)</span></label><input id=o_login placeholder="you@example.com">
+     <label>API key <span class=dim>(Settings → Users → API Keys)</span></label><input id=o_key type=password placeholder="blank = keep current">
+     <div id=o_status class=kv style="margin-top:12px"></div>
+     <div class=row style=margin-top:14px><button id=o_save>Link Odoo &amp; reconnect</button></div>
+    </div>
    </div>
   </div>
  </div></aside>
@@ -1296,8 +1306,13 @@ async function refreshHealth(){
  $('#adapter').textContent=up?'adapter connected':'adapter offline';
 }
 // Switch the active backend toggle (used when an adapter is linked/connected)
-function selectTarget(name){const sel=$('#target');if(sel.value!==name){sel.value=name;}refreshHealth();}
-$('#target').addEventListener('change',refreshHealth);
+function selectTarget(name){const sel=$('#target');if(sel.value!==name){sel.value=name;}refreshHealth();syncBackendForms();}
+$('#target').addEventListener('change',()=>{refreshHealth();syncBackendForms();});
+function syncBackendForms(){
+ const t=($('#target')&&$('#target').value)||'memory';
+ document.querySelectorAll('#panel-backend .bform').forEach(f=>{f.style.display=(f.dataset.for===t)?'block':'none';});
+ if(t==='live')loadBackend(); else if(t==='odoo')loadOdoo();
+}
 
 function actionCard(d){
  const c=add('card',`<h4>proposed action · ${esc(d.verb)}</h4>
@@ -1415,7 +1430,7 @@ async function openPanel(name){
  $('#clearev').style.display=name==='trace'?'':'none';
  setPolling(name==='trace');
  if(name==='provider'&&!Object.keys(CAT).length)await loadCatalog();
- if(name==='backend'){await loadBackend();await loadOdoo();}
+ if(name==='backend')syncBackendForms();
  if(name==='history')await loadHistory();
 }
 function closePanel(){activePanel=null;$('#drawer').classList.remove('open');setPolling(false);}

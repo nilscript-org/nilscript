@@ -174,9 +174,9 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
   .btn.tiny{padding:5px 10px;font-size:12px;border-radius:8px}
 
   /* ── timeline (responsive: table on desktop, cards on mobile) ── */
-  .feed{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--panel)}
-  .feed-head,.row{display:grid;grid-template-columns:84px 88px 130px minmax(160px,1fr) 92px 132px 1fr 110px;
-    align-items:center;gap:14px;padding:11px clamp(12px,2vw,18px)}
+  .feed{border:1px solid var(--line);border-radius:var(--radius);overflow-x:auto;background:var(--panel)}
+  .feed-head,.row{display:grid;grid-template-columns:78px 80px 120px minmax(150px,1.4fr) 84px 116px minmax(80px,1fr) 104px;
+    align-items:center;gap:12px;padding:8px clamp(12px,2vw,16px);min-width:760px}
   .feed-head{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.08em;
     border-bottom:1px solid var(--line);background:var(--elev)}
   .row{border-bottom:1px solid var(--line);transition:background .12s ease}
@@ -227,17 +227,10 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
   #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   #toast b{color:var(--violet)}
 
+  /* Narrow screens keep the compact table (records) and scroll horizontally — never big cards. */
   @media(max-width:760px){
-    .feed-head{display:none}
-    .feed{border:none;background:transparent}
-    .row{grid-template-columns:1fr;gap:7px;border:1px solid var(--line);border-radius:12px;
-      background:var(--panel);padding:14px;margin-bottom:11px}
-    .row:hover{background:var(--panel)}
-    .row>*{justify-self:start!important}
-    .row>*[data-l]::before{content:attr(data-l);color:var(--faint);font-size:10.5px;
-      text-transform:uppercase;letter-spacing:.07em;display:block;margin-bottom:1px}
-    .rowact{width:100%}.rowact .btn{width:100%;justify-content:center}
-    .row .t[data-l]{order:-1;color:var(--mut)}
+    main{padding:12px}
+    .feed-head,.row{gap:10px;padding:8px 12px}
   }
 </style></head><body>
 <header>
