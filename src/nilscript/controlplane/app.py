@@ -82,6 +82,10 @@ def create_app(store: EventStore | None = None, *, secret: str | None = None) ->
     def pending() -> dict[str, Any]:
         return {"pending": store.pending()}
 
+    @app.get("/api/adapters")
+    def adapters() -> dict[str, Any]:
+        return {"adapters": store.adapters()}
+
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
         return _INDEX_HTML
@@ -199,6 +203,22 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
   .empty{padding:54px 22px;text-align:center;color:var(--faint)}
   .empty .big{font-size:15px;color:var(--mut);margin-bottom:4px}
 
+  /* ── adapters ── */
+  #adaptersWrap{margin-bottom:26px;display:none}
+  #adapters{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+  .acard{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);
+    padding:14px 16px;position:relative;overflow:hidden}
+  .acard::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--green)}
+  .acard.stale::before{background:var(--faint)}
+  .acard .nm{font-weight:600;color:var(--verb);font-size:14.5px;display:flex;align-items:center;gap:8px}
+  .acard .nm .live{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 7px var(--green)}
+  .acard.stale .nm .live{background:var(--faint);box-shadow:none}
+  .acard .ns{margin:9px 0 7px;display:flex;flex-wrap:wrap;gap:5px}
+  .acard .ns span{font-size:11px;color:var(--mut);border:1px solid var(--line2);border-radius:6px;padding:1px 7px}
+  .acard .st{display:flex;gap:12px;color:var(--mut);font-size:12px;flex-wrap:wrap}
+  .acard .st b{color:var(--fg)}
+  .acard .ch{color:var(--faint);font-size:11px;margin-top:6px}
+
   /* toast */
   #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(20px);
     background:var(--elev);border:1px solid var(--line2);color:var(--fg);padding:11px 16px;
@@ -233,6 +253,12 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
     <div class=sec-title>⏳ Awaiting your approval <span class=n id=pcount>0</span>
       <span style="color:var(--faint);text-transform:none;letter-spacing:0">— nothing commits until you decide</span></div>
     <div id=pending></div>
+  </section>
+
+  <section id=adaptersWrap>
+    <div class=sec-title>Adapters <span class=n id=acount>0</span>
+      <span style="color:var(--faint);text-transform:none;letter-spacing:0">— backends linked &amp; live, derived from the stream</span></div>
+    <div id=adapters></div>
   </section>
 
   <div class=sec-title>Activity <span style="color:var(--faint);text-transform:none;letter-spacing:0">— every agent action, one pane</span></div>
@@ -324,9 +350,32 @@ async function pend(){
   }catch(_){}
 }
 
+function ago(iso){if(!iso)return '—';var t=new Date(iso+(/[zZ]|[+-]\\d\\d:?\\d\\d$/.test(iso)?'':'Z')).getTime();
+  var s=Math.max(0,(Date.now()-t)/1000);
+  return s<60?Math.floor(s)+'s ago':s<3600?Math.floor(s/60)+'m ago':Math.floor(s/3600)+'h ago';}
+async function loadAdapters(){
+ try{
+  const r=await fetch('/api/adapters');const {adapters}=await r.json();
+  const wrap=document.getElementById('adaptersWrap'),box=document.getElementById('adapters');
+  document.getElementById('acount').textContent=adapters.length;
+  wrap.style.display=adapters.length?'block':'none';
+  box.innerHTML=adapters.map(a=>{
+   const t=new Date((a.last_seen||'')+(/[zZ]$/.test(a.last_seen||'')?'':'Z')).getTime();
+   const stale=(Date.now()-t)>120000;
+   const ns=(a.namespaces||[]).map(n=>`<span>${esc(n)}.*</span>`).join('')||'<span style=opacity:.6>—</span>';
+   const by=a.by_event||{}, ex=by.executed||0, pr=by.proposed||0, rf=by.refused||0;
+   return `<div class="acard ${stale?'stale':''}">
+     <div class=nm><span class=live></span>${esc(a.system||a.adapter)}</div>
+     <div class=ns>${ns}</div>
+     <div class=st><span><b>${a.events}</b> events</span><span><b>${ex}</b> exec</span><span><b>${pr}</b> prop</span>${rf?`<span><b>${rf}</b> refused</span>`:''}</div>
+     <div class=ch>via ${esc((a.sources||[]).join(', ')||'—')} · ${esc(ago(a.last_seen))}</div>
+   </div>`;
+  }).join('');
+ }catch(_){}
+}
 function applyThemeGlyph(){var b=document.getElementById('themeBtn');if(b)b.textContent=document.documentElement.getAttribute('data-theme')==='light'?'☀':'☾';}
 function toggleTheme(){var next=document.documentElement.getAttribute('data-theme')==='light'?'dark':'light';document.documentElement.setAttribute('data-theme',next);try{localStorage.setItem('cp-theme',next);}catch(e){}applyThemeGlyph();}
-tick();pend();applyThemeGlyph();setInterval(()=>{tick();pend();},2000);
+tick();pend();loadAdapters();applyThemeGlyph();setInterval(()=>{tick();pend();loadAdapters();},2000);
 </script></body></html>"""
 
 

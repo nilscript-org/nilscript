@@ -133,6 +133,61 @@ class EventStore:
         with self._lock:
             return int(self._conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"])
 
+    def adapters(self, limit: int = 800) -> list[dict[str, Any]]:
+        """The distinct adapters/backends active in the timeline, derived purely from the audit log
+        (no separate registry). Keyed by the backend's `system` (from an executed event's ssot) when
+        known, else by the emitting source. Each carries event counts, channels, verb namespaces,
+        and last-seen — so the single pane also answers 'what's linked, and is it live?'."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT received_at, source, event, performative, verb, envelope "
+                "FROM events ORDER BY id DESC LIMIT ?",
+                (max(1, min(limit, 2000)),),
+            ).fetchall()
+        # Parse each row once; an executed event names the backend `system`, so map proposal→system
+        # to fold a proposal's other events (proposed/refused) into the same adapter, not a phantom.
+        parsed: list[dict[str, Any]] = []
+        proposal_system: dict[str, str] = {}
+        for row in rows:
+            rec = dict(row)
+            system, proposal = None, None
+            try:
+                body = json.loads(rec["envelope"]).get("body") or {}
+                proposal = body.get("proposal")
+                system = (((body.get("result") or {}).get("ssot") or {}).get("system"))
+            except (ValueError, TypeError):
+                pass
+            if proposal and system:
+                proposal_system[proposal] = system
+            parsed.append({**rec, "_system": system, "_proposal": proposal})
+
+        agg: dict[str, dict[str, Any]] = {}
+        for rec in parsed:
+            system = rec["_system"] or proposal_system.get(rec["_proposal"])
+            source = rec.get("source") or "?"
+            key = system or source
+            entry = agg.setdefault(key, {
+                "adapter": key, "system": system, "sources": set(), "events": 0,
+                "last_seen": rec["received_at"], "by_event": {}, "namespaces": set(),
+            })
+            entry["events"] += 1
+            entry["sources"].add(source)
+            if system and not entry["system"]:
+                entry["system"] = system
+            ev = rec.get("event") or rec.get("performative") or ""
+            entry["by_event"][ev] = entry["by_event"].get(ev, 0) + 1
+            verb = rec.get("verb") or ""
+            if "." in verb:
+                entry["namespaces"].add(verb.split(".", 1)[0])
+            if rec["received_at"] > entry["last_seen"]:
+                entry["last_seen"] = rec["received_at"]
+        out = [
+            {**e, "sources": sorted(e["sources"]), "namespaces": sorted(e["namespaces"])}
+            for e in agg.values()
+        ]
+        out.sort(key=lambda e: e["last_seen"], reverse=True)
+        return out
+
     # ── human-approval gate (Phase 2) ────────────────────────────────────────────────────────
     def _enrich(self, proposal_id: str) -> dict[str, Any]:
         """Pull verb/tier/preview from the proposal's 'proposed' event (the control plane already
