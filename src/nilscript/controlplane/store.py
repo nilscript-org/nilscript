@@ -127,6 +127,30 @@ class EventStore:
                 "event, proposal, verb, tier, severity, envelope FROM events ORDER BY id DESC LIMIT ?",
                 (max(1, min(limit, 1000)),),
             ).fetchall()
+        # An executed/refused event omits verb/tier and the human preview (those live on the
+        # proposal). Pull them from each row's matching `proposed` event in ONE query so the timeline
+        # can show the real verb, the tier, and a human one-liner (with the name) — not a bare id.
+        pids = [r["proposal"] for r in rows if r["proposal"]]
+        proposed: dict[str, dict[str, Any]] = {}
+        if pids:
+            uniq = list(dict.fromkeys(pids))
+            ph = ",".join("?" * len(uniq))
+            with self._lock:
+                prows = self._conn.execute(
+                    f"SELECT proposal, verb, tier, envelope FROM events "
+                    f"WHERE event = 'proposed' AND proposal IN ({ph})",
+                    uniq,
+                ).fetchall()
+            for pr in prows:
+                prev: Any = {}
+                try:
+                    prev = (json.loads(pr["envelope"]).get("body") or {}).get("preview") or {}
+                except (ValueError, TypeError):
+                    prev = {}
+                proposed[pr["proposal"]] = {
+                    "verb": pr["verb"], "tier": pr["tier"],
+                    "summary": prev.get("en") if isinstance(prev, dict) else None,
+                }
         out: list[dict[str, Any]] = []
         for row in rows:
             record = dict(row)
@@ -149,12 +173,16 @@ class EventStore:
             # miss: executed events omit `verb`/`tier` from the body (those live on the proposal),
             # so fall back to the result's entity type; and surface the backend + the affected entity
             # and a human one-liner so each row says WHAT happened, not just that something did.
-            record["verb"] = record.get("verb") or entity.get("type")
+            from_proposed = proposed.get(record.get("proposal") or "") or {}
+            record["verb"] = record.get("verb") or from_proposed.get("verb") or entity.get("type")
+            record["tier"] = record.get("tier") or from_proposed.get("tier")
             record["system"] = ssot.get("system")
             record["entity_id"] = entity.get("id")
             record["entity_url"] = entity.get("url")
+            # Human one-liner, best→worst: this event's own preview, the proposal's preview (has the
+            # name/value), else the affected entity path.
             preview = body.get("preview") or {}
-            summary = preview.get("en") if isinstance(preview, dict) else None
+            summary = (preview.get("en") if isinstance(preview, dict) else None) or from_proposed.get("summary")
             if not summary and entity:
                 eid = entity.get("id")
                 summary = f"{entity.get('url') or entity.get('type') or ''}".strip("/") or (str(eid) if eid else None)

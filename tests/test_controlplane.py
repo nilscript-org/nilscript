@@ -259,6 +259,27 @@ def test_recent_enriches_executed_event_with_entity_detail() -> None:
     assert row["reversibility"] == "REVERSIBLE" and row["compensation_token"] == "tok42"
 
 
+def test_recent_joins_executed_to_proposed_for_verb_tier_and_name() -> None:
+    # The executed event has no verb/tier/preview; its matching 'proposed' event does. The timeline
+    # must surface the real verb, tier, and the human one-liner (with the name) from the proposal.
+    s = _store()
+    s.ingest({
+        "nil": "0.1", "id": "pp1", "performative": "EVENT", "workspace": "owner",
+        "body": {"event": "proposed", "proposal": "px", "verb": "crm.create_contact", "tier": "MEDIUM",
+                 "preview": {"en": "Create contact «Ahmad Saleh»", "ar": "إنشاء جهة اتصال"}},
+    }, 1)
+    s.ingest({
+        "nil": "0.1", "id": "ee1", "performative": "EVENT", "workspace": "owner",
+        "body": {"event": "executed", "proposal": "px", "result": {
+            "entity": {"type": "contact", "id": "18", "url": "/res-partner/18"},
+            "ssot": {"system": "odoo_crm"}}},
+    }, 2)
+    ex = next(r for r in s.recent() if r["event"] == "executed")
+    assert ex["verb"] == "crm.create_contact"   # from the proposal, not the bare entity type
+    assert ex["tier"] == "MEDIUM"               # fills the empty tier column
+    assert ex["summary"] == "Create contact «Ahmad Saleh»"  # the human one-liner with the name
+
+
 def test_registry_view_is_public_and_redacted(monkeypatch) -> None:
     monkeypatch.setenv("NIL_WORKSPACE", "owner")
     s = _store()
