@@ -1010,9 +1010,10 @@ def _registry_call(method: str, path: str, body: dict | None = None) -> int:
         return 0
 
 
-def _activate_for_mcp(adapter_id: str, *, label: str, system: str) -> tuple[bool, str]:
+def _activate_for_mcp(adapter_id: str, *, label: str, system: str, actor: str = "") -> tuple[bool, str]:
     """Register this playground's shim as `adapter_id` and make it the workspace's active MCP backend.
-    Server-side only; caller must have already verified the owner session."""
+    Server-side only; caller must have already verified the owner session. Every flip is audit-logged
+    (actor + adapter + workspace + result) so an active-backend change is reconstructable from logs."""
     ws = REGISTRY["workspace"]
     if not (REGISTRY["cp_url"] and ws):
         return False, "registry not configured (set NIL_REGISTRY_URL + NIL_WORKSPACE)"
@@ -1021,10 +1022,15 @@ def _activate_for_mcp(adapter_id: str, *, label: str, system: str) -> tuple[bool
         "url": SELF_URLS.get(adapter_id, ""), "bearer": BEARER, "system": system,
     })
     if s != 200:
+        log.warning("ACTIVE-ADAPTER register FAILED workspace=%s adapter=%s actor=%s http=%s",
+                    ws, adapter_id, actor or "?", s)
         return False, f"register failed ({s})"
     s2 = _registry_call(
         "POST", f"/adapters/{urllib.parse.quote(ws)}/{urllib.parse.quote(adapter_id)}/activate")
-    if s2 != 200:
+    ok = s2 == 200
+    log.info("ACTIVE-ADAPTER flip workspace=%s adapter=%s system=%s actor=%s result=%s",
+             ws, adapter_id, system, actor or "?", "ok" if ok else f"activate-http-{s2}")
+    if not ok:
         return False, f"activate failed ({s2})"
     return True, "active for the hosted MCP"
 
@@ -1092,7 +1098,8 @@ async def set_odoo(creds: OdooIn, request: Request):
     # Owner-gated: route the hosted MCP to this just-linked Odoo (anonymous links stay local-only).
     mcp_active, mcp_message = False, ""
     if ok2 and _is_owner(request):
-        mcp_active, mcp_message = _activate_for_mcp("odoo", label="Odoo CRM", system="odoo_crm")
+        actor = "owner:" + request.cookies.get(OWNER_COOKIE, "")[:8]  # session fingerprint, not the token
+        mcp_active, mcp_message = _activate_for_mcp("odoo", label="Odoo CRM", system="odoo_crm", actor=actor)
         emit_event("STATUS", f"MCP routing → Odoo {'on' if mcp_active else 'failed'}",
                    {"message": mcp_message}, status="ok" if mcp_active else "err", level="connect")
     return {"ok": ok2, "message": msg2 if ok2 else f"verified, but {msg2}",
