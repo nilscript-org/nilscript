@@ -1632,13 +1632,13 @@ async function ownerState(){
   if(!s.enabled){el.style.display='none';return;}
   el.style.display='block';
   el.innerHTML=s.owner
-   ? '✓ <b>Owner</b> — linking will route the hosted MCP to this backend. <a href=# id=o_logout>log out</a>'
-   : 'Linking stays local to this session. <a href=# id=o_login>Owner login</a> to also route the hosted MCP.';
-  const li=$('#o_login'); if(li)li.onclick=async(e)=>{e.preventDefault();
+   ? '✓ <b>Owner</b> — linking will route the hosted MCP to this backend. <a href=# id=o_ownerout>log out</a>'
+   : 'Linking stays local to this session. <a href=# id=o_ownerin>Owner login</a> to also route the hosted MCP.';
+  const li=$('#o_ownerin'); if(li)li.onclick=async(e)=>{e.preventDefault();
    const t=prompt('Owner token'); if(!t)return;
    const r=await (await fetch('/api/owner/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:t})})).json();
    if(!r.ok)add('msg bot','owner login failed'); ownerState();};
-  const lo=$('#o_logout'); if(lo)lo.onclick=async(e)=>{e.preventDefault();
+  const lo=$('#o_ownerout'); if(lo)lo.onclick=async(e)=>{e.preventDefault();
    await fetch('/api/owner/logout',{method:'POST'}); ownerState();};
  }catch(_){}
 }
