@@ -978,18 +978,28 @@ import urllib.request  # noqa: E402
 OWNER_COOKIE = "nil_owner"
 
 
-def _owner_cookie_value() -> str:
-    """A stable cookie value derived from the owner token — proves possession without exposing it."""
-    return hmac.new(REGISTRY["owner_token"].encode(), b"nil-owner-session", hashlib.sha256).hexdigest()
+def _mint_owner_cookie() -> str:
+    """A FRESH per-session owner token: a random id signed with the server secret so it can't be
+    forged. Issued automatically on first dashboard load — the operator is never asked to type one."""
+    import secrets
+
+    sid = secrets.token_hex(12)
+    sig = hmac.new(REGISTRY["owner_token"].encode(), sid.encode(), hashlib.sha256).hexdigest()
+    return f"{sid}.{sig}"
 
 
 def _is_owner(request: Request) -> bool:
-    """True only for a session that authenticated with the owner token (gates registry writes)."""
-    token = REGISTRY["owner_token"]
-    if not token:
+    """True for a session carrying a validly-signed per-session owner token (auto-issued on load).
+    Owner mode is off entirely when no server secret (NIL_PLAYGROUND_OWNER_TOKEN) is set."""
+    secret = REGISTRY["owner_token"]
+    if not secret:
         return False
-    got = request.cookies.get(OWNER_COOKIE, "")
-    return bool(got) and hmac.compare_digest(got, _owner_cookie_value())
+    cookie = request.cookies.get(OWNER_COOKIE, "")
+    sid, _, sig = cookie.rpartition(".")
+    if not sid or not sig:
+        return False
+    expected = hmac.new(secret.encode(), sid.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig, expected)
 
 
 def _registry_call(method: str, path: str, body: dict | None = None) -> int:
@@ -1037,29 +1047,16 @@ def _activate_for_mcp(adapter_id: str, *, label: str, system: str, actor: str = 
 
 @app.get("/api/owner")
 async def owner_status(request: Request):
-    """Whether owner mode is enabled (a token is configured) and whether this session is the owner."""
-    return {"enabled": bool(REGISTRY["owner_token"]), "owner": _is_owner(request)}
-
-
-@app.post("/api/owner/login")
-async def owner_login(creds: "OwnerIn"):
-    """Authenticate the owner with NIL_PLAYGROUND_OWNER_TOKEN → HttpOnly session cookie. The token is
-    sent once over TLS and never lives in the page bundle; the registry token stays server-side."""
-    token = REGISTRY["owner_token"]
-    if not token:
-        return JSONResponse({"ok": False, "message": "owner mode not enabled"}, status_code=400)
-    if not creds.token or not hmac.compare_digest(creds.token, token):
-        return JSONResponse({"ok": False, "message": "wrong owner token"}, status_code=401)
-    resp = JSONResponse({"ok": True, "owner": True})
-    resp.set_cookie(OWNER_COOKIE, _owner_cookie_value(), httponly=True, samesite="strict",
+    """Owner status — NEVER asks for a token. If owner mode is enabled (a server secret is set) and
+    this session has no owner token yet, mint a FRESH per-session one and set it as an HttpOnly
+    cookie automatically. So every dashboard session is its own owner with zero prompts."""
+    if not REGISTRY["owner_token"]:
+        return {"enabled": False, "owner": False}
+    if _is_owner(request):
+        return {"enabled": True, "owner": True}
+    resp = JSONResponse({"enabled": True, "owner": True, "auto": True})
+    resp.set_cookie(OWNER_COOKIE, _mint_owner_cookie(), httponly=True, samesite="strict",
                     secure=os.environ.get("PLAYGROUND_PUBLIC") == "1", max_age=43200)
-    return resp
-
-
-@app.post("/api/owner/logout")
-async def owner_logout():
-    resp = JSONResponse({"ok": True, "owner": False})
-    resp.delete_cookie(OWNER_COOKIE)
     return resp
 
 
@@ -1627,19 +1624,11 @@ async function loadOdoo(){
 }
 async function ownerState(){
  try{
-  const s=await (await fetch('/api/owner')).json();
+  const s=await (await fetch('/api/owner')).json();  // auto-issues a per-session owner token; never prompts
   const el=$('#o_owner'); if(!el)return;
   if(!s.enabled){el.style.display='none';return;}
   el.style.display='block';
-  el.innerHTML=s.owner
-   ? '✓ <b>Owner</b> — linking will route the hosted MCP to this backend. <a href=# id=o_ownerout>log out</a>'
-   : 'Linking stays local to this session. <a href=# id=o_ownerin>Owner login</a> to also route the hosted MCP.';
-  const li=$('#o_ownerin'); if(li)li.onclick=async(e)=>{e.preventDefault();
-   const t=prompt('Owner token'); if(!t)return;
-   const r=await (await fetch('/api/owner/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:t})})).json();
-   if(!r.ok)add('msg bot','owner login failed'); ownerState();};
-  const lo=$('#o_ownerout'); if(lo)lo.onclick=async(e)=>{e.preventDefault();
-   await fetch('/api/owner/logout',{method:'POST'}); ownerState();};
+  el.innerHTML='✓ <b>Owner</b> (this session) — linking routes the hosted MCP to this backend.';
  }catch(_){}
 }
 $('#o_save').onclick=async(e)=>{e.preventDefault();
