@@ -11,6 +11,7 @@ imports no `mcp` SDK and is unit-testable with a trivial fake ctx. `server.py` w
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,12 +65,17 @@ def resolve_tenant(
     default: Tenant | None = None,
     multi_tenant: bool = False,
     allow_insecure: bool = False,
+    registry: Callable[[str], Tenant | None] | None = None,
 ) -> Tenant:
     """Resolve the backend for this connection.
 
     Single-tenant (default): always return `default` (back-compat — the env-configured backend).
-    Multi-tenant: read the `X-NIL-*` headers; require an https adapter URL. A connection that omits
-    the header falls back to `default` if one exists, else raises `TenantError`.
+    Multi-tenant: read the `X-NIL-*` headers; require an https adapter URL. Resolution precedence for
+    a multi-tenant connection:
+      1. `X-NIL-Adapter-Url` header → true per-connection BYO (always wins);
+      2. else, if the connection names a workspace (`X-NIL-Workspace`) and a `registry` lookup is
+         given, route to that workspace's *active* adapter (the control-plane registry);
+      3. else `default` if one exists, else `TenantError`.
     """
     if not multi_tenant:
         if default is None:
@@ -79,6 +85,13 @@ def resolve_tenant(
     headers = _headers(ctx)
     adapter_url = _get(headers, ADAPTER_URL_HEADER)
     if not adapter_url:
+        # This connection's workspace is its header, or — for a single-owner deployment where agents
+        # don't send one — the server's default workspace, so registry routing still applies.
+        workspace = _get(headers, WORKSPACE_HEADER) or (default.workspace if default else "")
+        if registry is not None and workspace:
+            resolved = registry(workspace)
+            if resolved is not None:
+                return resolved
         if default is not None:
             return default
         raise TenantError(

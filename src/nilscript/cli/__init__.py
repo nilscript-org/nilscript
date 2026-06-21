@@ -614,6 +614,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_mcpi.add_argument("--public-url", help="public MCP URL (e.g. https://nilscript.org/mcp)")
     p_mcpi.set_defaults(func=_cmd_mcp_info)
 
+    from nilscript.cli.adapters import add_adapters_parser
+
+    add_adapters_parser(sub)
+
     return parser
 
 

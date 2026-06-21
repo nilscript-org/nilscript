@@ -43,7 +43,26 @@ CREATE TABLE IF NOT EXISTS approvals (
     created_at  TEXT NOT NULL,
     decided_at  TEXT
 );
+
+-- Active-adapter registry: which backend the hosted MCP routes to per workspace. This is the ONE
+-- piece of mutable state the kernel keeps; `bearer` reaches the (tenant-owned) adapter, never the
+-- backend's own creds. Activating one adapter deactivates its siblings in the same workspace.
+CREATE TABLE IF NOT EXISTS adapters (
+    workspace   TEXT    NOT NULL DEFAULT '',
+    adapter_id  TEXT    NOT NULL,
+    label       TEXT    NOT NULL DEFAULT '',
+    url         TEXT    NOT NULL,
+    bearer      TEXT    NOT NULL DEFAULT '',
+    system      TEXT    NOT NULL DEFAULT '',
+    active      INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT    NOT NULL,
+    PRIMARY KEY (workspace, adapter_id)
+);
 """
+
+# Columns surfaced by the registry read methods (bearer included — the API layer redacts for the
+# public list endpoint; `active_adapter` keeps it because the MCP needs it to reach the adapter).
+_ADAPTER_COLS = "workspace, adapter_id, label, url, bearer, system, active, updated_at"
 
 
 def _now() -> str:
@@ -251,3 +270,67 @@ class EventStore:
                 "WHERE status = 'pending' ORDER BY created_at DESC"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── active-adapter registry (multi-tenant routing) ───────────────────────────────────────
+    def register_adapter(
+        self, workspace: str, adapter_id: str, *,
+        label: str = "", url: str, bearer: str = "", system: str = "",
+    ) -> dict[str, Any]:
+        """Upsert an adapter the MCP can route to. Re-registering updates its coordinates but
+        PRESERVES the active flag (so refreshing a bearer doesn't silently flip routing off)."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO adapters (workspace, adapter_id, label, url, bearer, system, active, updated_at) "
+                "VALUES (?,?,?,?,?,?,0,?) "
+                "ON CONFLICT(workspace, adapter_id) DO UPDATE SET "
+                "label=excluded.label, url=excluded.url, bearer=excluded.bearer, "
+                "system=excluded.system, updated_at=excluded.updated_at",
+                (workspace, adapter_id, label, url, bearer, system, _now()),
+            )
+            self._conn.commit()
+        return self._adapter(workspace, adapter_id) or {}
+
+    def activate_adapter(self, workspace: str, adapter_id: str) -> bool:
+        """Make `adapter_id` the active backend for `workspace`, deactivating its siblings.
+        Returns False if no such adapter is registered (so the caller can 404)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM adapters WHERE workspace = ? AND adapter_id = ?",
+                (workspace, adapter_id),
+            ).fetchone()
+            if row is None:
+                return False
+            self._conn.execute(
+                "UPDATE adapters SET active = CASE WHEN adapter_id = ? THEN 1 ELSE 0 END, "
+                "updated_at = ? WHERE workspace = ?",
+                (adapter_id, _now(), workspace),
+            )
+            self._conn.commit()
+        return True
+
+    def active_adapter(self, workspace: str) -> dict[str, Any] | None:
+        """The workspace's active adapter (WITH bearer — the MCP needs it), or None."""
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {_ADAPTER_COLS} FROM adapters WHERE workspace = ? AND active = 1 LIMIT 1",
+                (workspace,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_adapters(self, workspace: str) -> list[dict[str, Any]]:
+        """All registered adapters for a workspace (active first, then most-recent). Carries the
+        bearer — the API layer redacts it for the public list endpoint."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_ADAPTER_COLS} FROM adapters WHERE workspace = ? "
+                "ORDER BY active DESC, updated_at DESC",
+                (workspace,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _adapter(self, workspace: str, adapter_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            f"SELECT {_ADAPTER_COLS} FROM adapters WHERE workspace = ? AND adapter_id = ?",
+            (workspace, adapter_id),
+        ).fetchone()
+        return dict(row) if row is not None else None

@@ -135,3 +135,117 @@ def test_approval_endpoints() -> None:
     assert ok.json()["status"] == "approved"
     assert client.get("/proposals/pe/decision").json()["status"] == "approved"
     assert client.get("/api/pending").json()["pending"] == []
+
+
+# ── active-adapter registry (multi-tenant routing) ─────────────────────────────────────────────
+
+def test_register_then_active_returns_it() -> None:
+    s = _store()
+    s.register_adapter("ws1", "odoo", label="Odoo CRM",
+                       url="https://odoo.example/nil", bearer="tok-o", system="odoo_crm")
+    s.activate_adapter("ws1", "odoo")
+    a = s.active_adapter("ws1")
+    assert a is not None
+    assert a["adapter_id"] == "odoo" and a["url"] == "https://odoo.example/nil"
+    assert a["bearer"] == "tok-o" and a["system"] == "odoo_crm" and a["active"] == 1
+
+
+def test_activating_second_deactivates_first() -> None:
+    s = _store()
+    s.register_adapter("ws1", "pb", url="https://pb.example/nil", system="pocketbase")
+    s.register_adapter("ws1", "odoo", url="https://odoo.example/nil", system="odoo_crm")
+    s.activate_adapter("ws1", "pb")
+    assert s.active_adapter("ws1")["adapter_id"] == "pb"
+    s.activate_adapter("ws1", "odoo")
+    assert s.active_adapter("ws1")["adapter_id"] == "odoo"
+    actives = [a for a in s.list_adapters("ws1") if a["active"]]
+    assert len(actives) == 1 and actives[0]["adapter_id"] == "odoo"
+
+
+def test_activate_is_workspace_scoped() -> None:
+    s = _store()
+    s.register_adapter("ws1", "odoo", url="https://odoo.example/nil")
+    s.register_adapter("ws2", "pb", url="https://pb.example/nil")
+    s.activate_adapter("ws1", "odoo")
+    assert s.active_adapter("ws1")["adapter_id"] == "odoo"
+    assert s.active_adapter("ws2") is None  # ws2 has none active
+
+
+def test_activate_unknown_returns_false() -> None:
+    s = _store()
+    assert s.activate_adapter("ws1", "ghost") is False
+
+
+def test_reregister_preserves_active_flag() -> None:
+    s = _store()
+    s.register_adapter("ws1", "odoo", url="https://odoo.example/nil", bearer="old")
+    s.activate_adapter("ws1", "odoo")
+    s.register_adapter("ws1", "odoo", url="https://odoo.example/nil", bearer="new")
+    a = s.active_adapter("ws1")
+    assert a["active"] == 1 and a["bearer"] == "new"  # updated creds, still active
+
+
+def test_registry_endpoints_with_token() -> None:
+    s = _store()
+    token = "reg-secret"
+    client = TestClient(create_app(s, secret="", registry_token=token))
+    auth = {"Authorization": f"Bearer {token}"}
+
+    reg = client.post("/adapters/register", headers=auth, json={
+        "workspace": "ws1", "adapter_id": "odoo", "label": "Odoo CRM",
+        "url": "https://odoo.example/nil", "bearer": "tok-o", "system": "odoo_crm"})
+    assert reg.status_code == 200 and reg.json()["ok"] is True
+
+    act = client.post("/adapters/ws1/odoo/activate", headers=auth)
+    assert act.status_code == 200 and act.json()["ok"] is True
+
+    active = client.get("/adapters/active?workspace=ws1", headers=auth).json()
+    assert active["adapter"]["url"] == "https://odoo.example/nil"
+    assert active["adapter"]["bearer"] == "tok-o"
+
+
+def test_active_endpoint_requires_auth() -> None:
+    s = _store()
+    token = "reg-secret"
+    s.register_adapter("ws1", "odoo", url="https://odoo.example/nil", bearer="tok-o")
+    s.activate_adapter("ws1", "odoo")
+    client = TestClient(create_app(s, secret="", registry_token=token))
+    # No bearer → the endpoint that exposes the adapter bearer must reject.
+    assert client.get("/adapters/active?workspace=ws1").status_code == 401
+    assert client.post("/adapters/register", json={"workspace": "ws1", "adapter_id": "x",
+                                                   "url": "https://x.example/nil"}).status_code == 401
+    assert client.post("/adapters/ws1/odoo/activate").status_code == 401
+
+
+def test_list_endpoint_redacts_bearer_and_is_public() -> None:
+    s = _store()
+    s.register_adapter("ws1", "odoo", url="https://odoo.example/nil", bearer="supersecret")
+    s.activate_adapter("ws1", "odoo")
+    client = TestClient(create_app(s, secret="", registry_token="reg-secret"))
+    # List is for the UI: public read, but the bearer must never appear.
+    listed = client.get("/adapters?workspace=ws1")
+    assert listed.status_code == 200
+    rows = listed.json()["adapters"]
+    assert rows[0]["adapter_id"] == "odoo" and rows[0]["active"] == 1
+    assert "supersecret" not in json.dumps(rows)
+    assert rows[0].get("bearer") in (None, "", "***")
+
+
+def test_active_endpoint_404_when_none_active() -> None:
+    s = _store()
+    client = TestClient(create_app(s, secret="", registry_token=""))
+    # No token configured → open; no active adapter → 404 (not a 500, not a silent null).
+    assert client.get("/adapters/active?workspace=ws1").status_code == 404
+
+
+def test_registry_view_is_public_and_redacted(monkeypatch) -> None:
+    monkeypatch.setenv("NIL_WORKSPACE", "owner")
+    s = _store()
+    s.register_adapter("owner", "odoo", url="https://odoo/nil", bearer="supersecret", system="odoo_crm")
+    s.activate_adapter("owner", "odoo")
+    client = TestClient(create_app(s, secret="", registry_token="reg-tok"))
+    # Public read (no auth) for the cp page — scoped to NIL_WORKSPACE, bearer never present.
+    body = client.get("/api/registry").json()
+    assert body["workspace"] == "owner"
+    assert body["adapters"][0]["adapter_id"] == "odoo" and body["adapters"][0]["active"] == 1
+    assert "supersecret" not in json.dumps(body)

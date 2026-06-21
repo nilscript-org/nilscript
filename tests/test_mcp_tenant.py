@@ -87,3 +87,55 @@ def test_two_tenants_are_distinct() -> None:
     a = resolve_tenant(_FakeCtx({ADAPTER_URL_HEADER: "https://a"}), multi_tenant=True)
     b = resolve_tenant(_FakeCtx({ADAPTER_URL_HEADER: "https://b"}), multi_tenant=True)
     assert a.key() != b.key()
+
+
+# ── active-adapter registry resolution (header-less connections) ────────────────────────────────
+
+from nilscript.mcp.tenant import WORKSPACE_HEADER  # noqa: E402
+
+
+def _registry(mapping: dict[str, Tenant]):
+    """A pure stand-in for the CP active-adapter lookup: workspace → Tenant | None."""
+    return lambda ws: mapping.get(ws)
+
+
+def test_no_header_resolves_active_adapter_from_registry() -> None:
+    reg = _registry({"acme": Tenant(adapter_url="https://acme-odoo", bearer="b", workspace="acme")})
+    ctx = _FakeCtx({WORKSPACE_HEADER: "acme"})  # no adapter-url header
+    t = resolve_tenant(ctx, default=DEFAULT, multi_tenant=True, registry=reg)
+    assert t.adapter_url == "https://acme-odoo" and t.workspace == "acme"
+
+
+def test_explicit_adapter_header_wins_over_registry() -> None:
+    reg = _registry({"acme": Tenant(adapter_url="https://acme-odoo", workspace="acme")})
+    ctx = _FakeCtx({ADAPTER_URL_HEADER: "https://byo-adapter", WORKSPACE_HEADER: "acme"})
+    t = resolve_tenant(ctx, default=DEFAULT, multi_tenant=True, registry=reg)
+    assert t.adapter_url == "https://byo-adapter"  # per-connection BYO beats the registry default
+
+
+def test_registry_miss_falls_back_to_default() -> None:
+    reg = _registry({})  # workspace has no active adapter
+    ctx = _FakeCtx({WORKSPACE_HEADER: "acme"})
+    assert resolve_tenant(ctx, default=DEFAULT, multi_tenant=True, registry=reg) is DEFAULT
+
+
+def test_header_less_connection_uses_default_workspace_for_registry() -> None:
+    # Single-owner deployment: agents send no workspace header; the server's default workspace is
+    # used to look up the active adapter.
+    reg = _registry({"owner": Tenant(adapter_url="https://owner-active", workspace="owner")})
+    default = Tenant(adapter_url="https://env-default", workspace="owner")
+    ctx = _FakeCtx({})  # no headers at all
+    t = resolve_tenant(ctx, default=default, multi_tenant=True, registry=reg)
+    assert t.adapter_url == "https://owner-active"
+
+
+def test_registry_not_consulted_without_workspace() -> None:
+    calls: list[str] = []
+
+    def reg(ws):
+        calls.append(ws)
+        return Tenant(adapter_url="https://x")
+
+    ctx = _FakeCtx({})  # no workspace, no adapter url
+    assert resolve_tenant(ctx, default=DEFAULT, multi_tenant=True, registry=reg) is DEFAULT
+    assert calls == []  # no workspace → registry never queried

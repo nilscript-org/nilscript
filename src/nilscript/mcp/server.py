@@ -100,10 +100,12 @@ class TenantToolsProvider(ToolsProvider):
         default: Tenant | None = None,
         allow_insecure: bool = False,
         gate: str = "two-step",
+        registry: Any = None,
     ) -> None:
         self._default = default
         self._allow_insecure = allow_insecure
         self._gate = gate
+        self._registry = registry
         self._cache: dict[str, NilTools] = {}
 
     def get(self, ctx: Any) -> NilTools:
@@ -112,7 +114,8 @@ class TenantToolsProvider(ToolsProvider):
         if cached is not None:
             return cached
         tenant = resolve_tenant(
-            ctx, default=self._default, multi_tenant=True, allow_insecure=self._allow_insecure
+            ctx, default=self._default, multi_tenant=True,
+            allow_insecure=self._allow_insecure, registry=self._registry,
         )
         tools = build_tools(
             adapter_url=tenant.adapter_url,
@@ -383,7 +386,12 @@ def build_asgi_app(
             adapter_url=adapter_url, bearer=bearer, grant_id=grant_id,
             workspace=workspace, scopes=scopes,
         )
-        provider = TenantToolsProvider(default=default, allow_insecure=allow_insecure, gate=gate)
+        from nilscript.mcp.registry import make_registry_lookup
+
+        provider = TenantToolsProvider(
+            default=default, allow_insecure=allow_insecure, gate=gate,
+            registry=make_registry_lookup(),
+        )
     server = build_server(tools, dynamic_verbs=verbs, tools_provider=provider)
     app = server.streamable_http_app()  # MCP mounted at /mcp
 

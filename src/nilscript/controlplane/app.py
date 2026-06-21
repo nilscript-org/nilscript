@@ -20,10 +20,34 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from nilscript.controlplane.store import EventStore
 
 
-def create_app(store: EventStore | None = None, *, secret: str | None = None) -> FastAPI:
+def _redact(adapter: dict[str, Any]) -> dict[str, Any]:
+    """A registry record safe to hand to the browser: the bearer (which reaches the adapter) is
+    masked to a presence flag, never the value."""
+    if not adapter:
+        return {}
+    bearer = adapter.get("bearer")
+    return {**adapter, "bearer": "***" if bearer else ""}
+
+
+def create_app(
+    store: EventStore | None = None, *,
+    secret: str | None = None,
+    registry_token: str | None = None,
+) -> FastAPI:
     store = store if store is not None else EventStore()
     secret = secret if secret is not None else os.environ.get("NIL_EVENTS_SECRET", "")
+    registry_token = (
+        registry_token if registry_token is not None
+        else os.environ.get("NIL_REGISTRY_TOKEN", "")
+    )
     app = FastAPI(title="nilscript control plane", version="0.1.0")
+
+    def _registry_authed(authorization: str | None) -> bool:
+        """Guard the registry's sensitive endpoints. Open when no token is configured (local/test);
+        otherwise require `Authorization: Bearer <NIL_REGISTRY_TOKEN>`."""
+        if not registry_token:
+            return True
+        return bool(authorization) and hmac.compare_digest(authorization, f"Bearer {registry_token}")
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
@@ -85,6 +109,57 @@ def create_app(store: EventStore | None = None, *, secret: str | None = None) ->
     @app.get("/api/adapters")
     def adapters() -> dict[str, Any]:
         return {"adapters": store.adapters()}
+
+    # ── active-adapter registry (multi-tenant routing) ───────────────────────────────────────
+    @app.post("/adapters/register")
+    async def register_adapter(request: Request, authorization: str | None = Header(default=None)) -> Any:
+        """Register/refresh an adapter the MCP can route to (auth-protected — carries a bearer)."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "bad json"}, status_code=400)
+        ws, aid, url = body.get("workspace", "") or "", body.get("adapter_id"), body.get("url")
+        if not aid or not url:
+            return JSONResponse({"error": "adapter_id and url are required"}, status_code=400)
+        rec = store.register_adapter(
+            ws, aid, label=body.get("label", "") or "", url=url,
+            bearer=body.get("bearer", "") or "", system=body.get("system", "") or "",
+        )
+        return {"ok": True, "adapter": _redact(rec)}
+
+    @app.post("/adapters/{workspace}/{adapter_id}/activate")
+    def activate_adapter(workspace: str, adapter_id: str, authorization: str | None = Header(default=None)) -> Any:
+        """Make this adapter the active backend for the workspace (auth-protected)."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if not store.activate_adapter(workspace, adapter_id):
+            return JSONResponse({"error": "no such adapter"}, status_code=404)
+        return {"ok": True, "workspace": workspace, "adapter_id": adapter_id}
+
+    @app.get("/adapters")
+    def list_adapters(workspace: str = "") -> dict[str, Any]:
+        """List a workspace's registered adapters for the UI — bearer REDACTED (public read)."""
+        return {"adapters": [_redact(a) for a in store.list_adapters(workspace)]}
+
+    @app.get("/api/registry")
+    def registry_view() -> dict[str, Any]:
+        """Read-only registry view for the PUBLIC control-plane page: which adapter the MCP routes to
+        for the owner workspace, bearer REDACTED. No write controls live in the browser — activation
+        is operator-only via `nilscript adapters activate` (token never reaches the client)."""
+        ws = os.environ.get("NIL_WORKSPACE", "")
+        return {"workspace": ws, "adapters": [_redact(a) for a in store.list_adapters(ws)]}
+
+    @app.get("/adapters/active")
+    def get_active_adapter(workspace: str = "", authorization: str | None = Header(default=None)) -> Any:
+        """The workspace's active adapter WITH bearer — for the MCP to route. Auth-protected."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        active = store.active_adapter(workspace)
+        if active is None:
+            return JSONResponse({"error": "no active adapter"}, status_code=404)
+        return {"adapter": active}
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -203,6 +278,21 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
   .empty{padding:54px 22px;text-align:center;color:var(--faint)}
   .empty .big{font-size:15px;color:var(--mut);margin-bottom:4px}
 
+  /* ── mcp routing (read-only registry) ── */
+  #routingWrap{margin-bottom:26px;display:none}
+  #routing{display:grid;gap:10px}
+  .rrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;border:1px solid var(--line);
+    border-radius:var(--radius);background:var(--panel);padding:11px 15px}
+  .rrow.on{border-color:rgba(70,194,102,.45);background:linear-gradient(180deg,rgba(70,194,102,.07),transparent)}
+  .rrow .nm{font-weight:600;color:var(--verb)}
+  .rrow .sys{color:var(--mut);font-size:12px;border:1px solid var(--line2);border-radius:6px;padding:1px 7px}
+  .rrow .host{color:var(--faint);font-size:12px}
+  .rrow .grow{flex:1 1 auto}
+  .rbadge{font-size:11px;padding:2px 10px;border-radius:999px;border:1px solid var(--line2);color:var(--mut)}
+  .rbadge.on{color:var(--green);border-color:rgba(70,194,102,.45);background:rgba(70,194,102,.08)}
+  #routing code,.sec-title code{font-size:11.5px;color:var(--verb);background:var(--elev);
+    border:1px solid var(--line2);border-radius:5px;padding:1px 6px}
+
   /* ── adapters ── */
   #adaptersWrap{margin-bottom:26px;display:none}
   #adapters{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
@@ -246,6 +336,12 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
     <div class=sec-title>⏳ Awaiting your approval <span class=n id=pcount>0</span>
       <span style="color:var(--faint);text-transform:none;letter-spacing:0">— nothing commits until you decide</span></div>
     <div id=pending></div>
+  </section>
+
+  <section id=routingWrap>
+    <div class=sec-title>MCP routing <span class=n id=rcount>0</span>
+      <span style="color:var(--faint);text-transform:none;letter-spacing:0">— the active backend agents reach via the hosted MCP (switch with <code>nilscript adapters activate</code>)</span></div>
+    <div id=routing></div>
   </section>
 
   <section id=adaptersWrap>
@@ -366,9 +462,28 @@ async function loadAdapters(){
   }).join('');
  }catch(_){}
 }
+function host(u){try{return new URL(u).host;}catch(e){return u||'';}}
+async function loadRouting(){
+ try{
+  const r=await fetch('/api/registry');const {adapters}=await r.json();
+  const wrap=document.getElementById('routingWrap'),box=document.getElementById('routing');
+  document.getElementById('rcount').textContent=adapters.length;
+  wrap.style.display=adapters.length?'block':'none';
+  box.innerHTML=adapters.map(a=>{
+   const on=!!a.active;
+   return `<div class="rrow ${on?'on':''}">
+     <span class=nm>${esc(a.label||a.adapter_id)}</span>
+     <span class=sys>${esc(a.system||a.adapter_id)}</span>
+     <span class=host>${esc(host(a.url))}</span>
+     <span class=grow></span>
+     <span class="rbadge ${on?'on':''}">${on?'● active':'idle'}</span>
+   </div>`;
+  }).join('');
+ }catch(_){}
+}
 function applyThemeGlyph(){var b=document.getElementById('themeBtn');if(b)b.textContent=document.documentElement.getAttribute('data-theme')==='light'?'☀':'☾';}
 function toggleTheme(){var next=document.documentElement.getAttribute('data-theme')==='light'?'dark':'light';document.documentElement.setAttribute('data-theme',next);try{localStorage.setItem('cp-theme',next);}catch(e){}applyThemeGlyph();}
-tick();pend();loadAdapters();applyThemeGlyph();setInterval(()=>{tick();pend();loadAdapters();},2000);
+tick();pend();loadAdapters();loadRouting();applyThemeGlyph();setInterval(()=>{tick();pend();loadAdapters();loadRouting();},2000);
 </script></body></html>"""
 
 
