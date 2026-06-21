@@ -40,6 +40,7 @@ BEARER = "secret123"  # shims booted by this launcher use this bearer; grant sec
 TARGETS = {
     "memory": {"label": "in-memory (FakeSystem)", "url": "http://127.0.0.1:8099", "script": "run_auth_shim.py"},
     "live": {"label": "live PocketBase", "url": "http://127.0.0.1:8100", "script": "run_live_shim.py"},
+    "odoo": {"label": "live Odoo CRM", "url": "http://127.0.0.1:8101", "script": "run_odoo_shim.py"},
 }
 
 # Live PocketBase credentials — editable at runtime via the Backend panel, so you can
@@ -50,6 +51,16 @@ LIVE_CREDS: dict[str, str] = {
     "password": os.environ.get("PB_PASSWORD", "123456"),
 }
 LIVE_PROC: subprocess.Popen | None = None  # the live shim subprocess (respawnable)
+
+# Live Odoo CRM credentials — filled per-session via the Backend panel (BYO: the key stays in this
+# process only; never persisted in public mode). Same respawnable-subprocess pattern as PocketBase.
+ODOO_CREDS: dict[str, str] = {
+    "url": os.environ.get("ODOO_URL", ""),
+    "db": os.environ.get("ODOO_DB", ""),
+    "login": os.environ.get("ODOO_LOGIN", ""),
+    "api_key": os.environ.get("ODOO_API_KEY", ""),
+}
+ODOO_PROC: subprocess.Popen | None = None  # the Odoo shim subprocess (respawnable)
 
 # Runtime config. `provider` is a LiteLLM provider key (e.g. "openai", "anthropic", "ollama").
 CONFIG: dict[str, str] = {"provider": "", "model": "", "api_key": "", "api_base": ""}
@@ -571,6 +582,54 @@ def spawn_live(*, restart: bool = False) -> tuple[bool, str]:
     return False, "shim did not come up"
 
 
+def verify_odoo(creds: dict[str, str]) -> tuple[bool, str]:
+    """Auth against Odoo (XML-RPC) before we touch the running shim, so a bad change is rejected
+    cleanly. Imports the adapter lazily — a build without it just reports that honestly."""
+    if not all(creds.get(k) for k in ("url", "db", "login", "api_key")):
+        return False, "fill url, database, login, and api key"
+    try:
+        from odoo_crm_nil_adapter.system import RealSystemClient
+    except ModuleNotFoundError:
+        return False, "Odoo adapter not installed in this build"
+    try:
+        client = RealSystemClient(creds["url"], db=creds["db"], login=creds["login"], api_key=creds["api_key"])
+        uid = client._auth()
+        return True, f"linked — Odoo uid {uid}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"odoo auth failed: {type(exc).__name__}: {exc}"
+
+
+def spawn_odoo(*, restart: bool = False) -> tuple[bool, str]:
+    """(Re)start the Odoo shim against ODOO_CREDS. Verifies creds first (mirrors spawn_live)."""
+    global ODOO_PROC
+    ok, msg = verify_odoo(ODOO_CREDS)
+    if not ok:
+        return False, msg
+    url = TARGETS["odoo"]["url"]
+    if restart and ODOO_PROC and ODOO_PROC.poll() is None:
+        ODOO_PROC.terminate()
+        try:
+            ODOO_PROC.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            ODOO_PROC.kill()
+    if restart:
+        for _ in range(20):
+            if not _port_up(url):
+                break
+            time.sleep(0.25)
+    env = {**os.environ, "NIL_BEARER": BEARER,
+           "ODOO_URL": ODOO_CREDS["url"], "ODOO_DB": ODOO_CREDS["db"],
+           "ODOO_LOGIN": ODOO_CREDS["login"], "ODOO_API_KEY": ODOO_CREDS["api_key"]}
+    shim_log = open("/tmp/nil-odoo-shim.log", "w")  # noqa: SIM115
+    ODOO_PROC = subprocess.Popen([sys.executable, os.path.join(HERE, TARGETS["odoo"]["script"])],
+                                 cwd=HERE, env=env, stdout=shim_log, stderr=shim_log)
+    for _ in range(40):
+        if _port_up(url):
+            return True, msg
+        time.sleep(0.25)
+    return False, "shim did not come up"
+
+
 def _port_up(url: str) -> bool:
     try:
         httpx.get(url + "/nil/v0.1/status/probeprobe", timeout=1.5)
@@ -600,6 +659,13 @@ def launch_shims() -> None:
     else:
         ok, msg = spawn_live()
         print(f"  [launcher] live shim: {msg}" if ok else f"  [launcher] live shim NOT up: {msg}")
+    # odoo shim (best-effort — only if creds are already configured in the environment)
+    if all(ODOO_CREDS.get(k) for k in ("url", "db", "login", "api_key")):
+        if _port_up(TARGETS["odoo"]["url"]):
+            print(f"  [launcher] odoo shim already up at {TARGETS['odoo']['url']}")
+        else:
+            ok, msg = spawn_odoo()
+            print(f"  [launcher] odoo shim: {msg}" if ok else f"  [launcher] odoo shim NOT up: {msg}")
 
 
 async def connect_checks(target: str) -> list[dict]:
@@ -870,6 +936,48 @@ async def set_backend(creds: BackendIn):
             "url": LIVE_CREDS["url"], "identity": LIVE_CREDS["identity"],
             "connected": _port_up(TARGETS["live"]["url"]), "steps": steps,
             "skeleton": (SKELETON.get("live") or {}).get("targets", {})}  # full capabilities, expandable
+
+
+class OdooIn(BaseModel):
+    url: str = ""
+    db: str = ""
+    login: str = ""
+    api_key: str = ""
+
+
+@app.get("/api/odoo")
+async def get_odoo():
+    """Current live-Odoo link (api key never returned)."""
+    return {"url": ODOO_CREDS["url"], "db": ODOO_CREDS["db"], "login": ODOO_CREDS["login"],
+            "connected": _port_up(TARGETS["odoo"]["url"])}
+
+
+@app.post("/api/odoo")
+async def set_odoo(creds: OdooIn):
+    """Link live Odoo CRM with your own keys (this session only). Blank fields keep the current
+    value. Verified before the running shim is touched — a bad change keeps the current link."""
+    candidate = {
+        "url": creds.url.strip() or ODOO_CREDS["url"],
+        "db": creds.db.strip() or ODOO_CREDS["db"],
+        "login": creds.login.strip() or ODOO_CREDS["login"],
+        "api_key": creds.api_key if creds.api_key != "" else ODOO_CREDS["api_key"],
+    }
+    log.info("ODOO link attempt -> %s db=%s as %s", candidate["url"], candidate["db"], candidate["login"])
+    emit_event("STATUS", f"linking Odoo {candidate['url']} (db {candidate['db']}) as {candidate['login']}", {})
+    ok, msg = verify_odoo(candidate)
+    if not ok:
+        emit_event("STATUS", "Odoo link rejected (current kept)", {"message": msg}, status="err")
+        return {"ok": False, "message": msg, "url": ODOO_CREDS["url"], "db": ODOO_CREDS["db"],
+                "login": ODOO_CREDS["login"], "connected": _port_up(TARGETS["odoo"]["url"])}
+    ODOO_CREDS.update(candidate)  # only commit verified creds
+    ok2, msg2 = spawn_odoo(restart=True)
+    steps = await connect_checks("odoo") if ok2 else []
+    emit_event("STATUS", f"Odoo {'linked' if ok2 else 'link failed'}", {"message": msg2},
+               status="ok" if ok2 else "err", level="connect")
+    return {"ok": ok2, "message": msg2 if ok2 else f"verified, but {msg2}",
+            "url": ODOO_CREDS["url"], "db": ODOO_CREDS["db"], "login": ODOO_CREDS["login"],
+            "connected": _port_up(TARGETS["odoo"]["url"]), "steps": steps,
+            "skeleton": (SKELETON.get("odoo") or {}).get("targets", {})}
 
 
 @app.post("/api/chat")
@@ -1155,6 +1263,15 @@ HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
     <label>Password</label><input id=b_pass type=password placeholder="123456 (blank = keep current)">
     <div id=b_status class=kv style="margin-top:12px"></div>
     <div class=row style=margin-top:14px><button id=b_save>Link &amp; reconnect</button></div>
+
+    <hr style="border:none;border-top:1px solid var(--line);margin:20px 0 16px">
+    <p class=ptext>Or link <b>live Odoo CRM</b> — your own keys, used only this session (never stored). After linking, pick <b>live Odoo CRM</b> in the backend selector. Any future adapter links the same way.</p>
+    <label>Odoo URL</label><input id=o_url placeholder="https://yourco.odoo.com">
+    <label>Database</label><input id=o_db placeholder="yourco">
+    <label>Login <span class=dim>(email)</span></label><input id=o_login placeholder="you@example.com">
+    <label>API key <span class=dim>(Settings → Users → API Keys)</span></label><input id=o_key type=password placeholder="blank = keep current">
+    <div id=o_status class=kv style="margin-top:12px"></div>
+    <div class=row style=margin-top:14px><button id=o_save>Link Odoo &amp; reconnect</button></div>
    </div>
   </div>
  </div></aside>
@@ -1298,7 +1415,7 @@ async function openPanel(name){
  $('#clearev').style.display=name==='trace'?'':'none';
  setPolling(name==='trace');
  if(name==='provider'&&!Object.keys(CAT).length)await loadCatalog();
- if(name==='backend')await loadBackend();
+ if(name==='backend'){await loadBackend();await loadOdoo();}
  if(name==='history')await loadHistory();
 }
 function closePanel(){activePanel=null;$('#drawer').classList.remove('open');setPolling(false);}
@@ -1354,6 +1471,31 @@ $('#b_save').onclick=async(e)=>{e.preventDefault();
  }
  $('#b_status').innerHTML=steps+`<div class=kv style=margin:6px 0>${r.ok?'✓ ':'✗ '}${esc(r.message)}</div>`+cap;
  if(r.ok){selectTarget('live');add('sys','backend connected (reachable · conformant · provisioned) — switched to live PocketBase');}
+ refreshHealth();
+}
+
+async function loadOdoo(){
+ const o=await (await fetch('/api/odoo')).json();
+ $('#o_url').value=o.url||'';$('#o_db').value=o.db||'';$('#o_login').value=o.login||'';$('#o_key').value='';
+ $('#o_status').innerHTML=o.connected?'status <b>connected</b>':'status <b>offline</b>';
+}
+$('#o_save').onclick=async(e)=>{e.preventDefault();
+ $('#o_status').innerHTML='<div class=kv>connecting to Odoo…</div>';
+ const r=await (await fetch('/api/odoo',{method:'POST',headers:{'content-type':'application/json'},
+  body:JSON.stringify({url:$('#o_url').value,db:$('#o_db').value,login:$('#o_login').value,api_key:$('#o_key').value})})).json();
+ const steps=(r.steps||[]).map(s=>`<div class=cstep><span class="cdot ${s.ok?'on':'bad'}"></span>`
+   +`<b>${esc(s.step)}</b> <span class=t>${esc(s.detail)}</span></div>`).join('');
+ const sk=r.skeleton||{}; const names=Object.keys(sk);
+ let cap='';
+ if(names.length){
+  cap=`<details class=caps open><summary>capabilities · ${names.length} targets (click to expand)</summary>`;
+  for(const n of names){const t=sk[n], fs=(t.fields||[]);
+   const fields=fs.length?fs.map(f=>`<span class=fld>${esc(f.name)}<i>:${esc(f.type)}</i>${f.required?'<b>!</b>':''}</span>`).join(''):'<span class=t>(no declared fields)</span>';
+   cap+=`<div class=cap><span class="cdot ${t.exists?'on':'bad'}"></span><b>${esc(n)}</b> <span class=t>${fs.length} fields</span><div class=flds>${fields}</div></div>`;}
+  cap+=`</details>`;
+ }
+ $('#o_status').innerHTML=steps+`<div class=kv style=margin:6px 0>${r.ok?'✓ ':'✗ '}${esc(r.message)}</div>`+cap;
+ if(r.ok){selectTarget('odoo');add('sys','Odoo CRM connected — switched to live Odoo CRM');}
  refreshHealth();
 }
 
