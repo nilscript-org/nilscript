@@ -174,7 +174,7 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
   .feed-head,.row{display:grid;grid-template-columns:84px 88px 130px minmax(160px,1fr) 92px 132px 1fr 110px;
     align-items:center;gap:14px;padding:11px clamp(12px,2vw,18px)}
   .feed-head{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.08em;
-    border-bottom:1px solid var(--line);background:rgba(255,255,255,.015);position:sticky;top:57px;z-index:5}
+    border-bottom:1px solid var(--line);background:var(--elev)}
   .row{border-bottom:1px solid var(--line);transition:background .12s ease}
   .row:last-child{border-bottom:none}
   .row:hover{background:var(--rowhover)}
