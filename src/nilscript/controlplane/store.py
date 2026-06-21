@@ -131,20 +131,35 @@ class EventStore:
         for row in rows:
             record = dict(row)
             envelope = record.pop("envelope", None)
-            # Surface the compensation handle for an executed write so the UI can offer a rollback
-            # affordance on exactly the reversible rows (and nothing else).
-            reversibility, token = None, None
+            body: dict[str, Any] = {}
             if envelope:
                 try:
-                    comp = (
-                        ((json.loads(envelope).get("body") or {}).get("result") or {}).get("compensation") or {}
-                    )
-                    reversibility = comp.get("reversibility")
-                    token = comp.get("token")
+                    body = json.loads(envelope).get("body") or {}
                 except (ValueError, TypeError):
-                    pass
-            record["reversibility"] = reversibility
-            record["compensation_token"] = token
+                    body = {}
+            result = body.get("result") or {}
+            entity = result.get("entity") or {}
+            ssot = result.get("ssot") or {}
+            comp = result.get("compensation") or {}
+            # Surface the compensation handle for an executed write so the UI can offer a rollback
+            # affordance on exactly the reversible rows (and nothing else).
+            record["reversibility"] = comp.get("reversibility")
+            record["compensation_token"] = comp.get("token")
+            # Enrich the timeline with detail the envelope already carries but the indexed columns
+            # miss: executed events omit `verb`/`tier` from the body (those live on the proposal),
+            # so fall back to the result's entity type; and surface the backend + the affected entity
+            # and a human one-liner so each row says WHAT happened, not just that something did.
+            record["verb"] = record.get("verb") or entity.get("type")
+            record["system"] = ssot.get("system")
+            record["entity_id"] = entity.get("id")
+            record["entity_url"] = entity.get("url")
+            preview = body.get("preview") or {}
+            summary = preview.get("en") if isinstance(preview, dict) else None
+            if not summary and entity:
+                eid = entity.get("id")
+                summary = f"{entity.get('url') or entity.get('type') or ''}".strip("/") or (str(eid) if eid else None)
+            record["summary"] = summary
+            record["args"] = body.get("args") or None
             out.append(record)
         return out
 
