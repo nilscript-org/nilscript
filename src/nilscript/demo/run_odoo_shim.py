@@ -37,4 +37,7 @@ def build_odoo_app():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(build_odoo_app(), host="127.0.0.1", port=8101)
+    # Default loopback (local dev); the hosted playground sets NIL_SHIM_HOST=0.0.0.0 so the mcp
+    # container can reach this shim at nilscript-playground:8101 when the owner activates it.
+    host = os.environ.get("NIL_SHIM_HOST", "127.0.0.1")
+    uvicorn.run(build_odoo_app(), host=host, port=8101)

@@ -65,6 +65,25 @@ ODOO_PROC: subprocess.Popen | None = None  # the Odoo shim subprocess (respawnab
 # Runtime config. `provider` is a LiteLLM provider key (e.g. "openai", "anthropic", "ollama").
 CONFIG: dict[str, str] = {"provider": "", "model": "", "api_key": "", "api_base": ""}
 
+# Active-adapter registry: when an OWNER links a backend in the dashboard, the playground registers +
+# activates THAT backend in the control plane so the hosted MCP routes to it. The dashboard is the
+# only write path to the active-backend pointer; backend creds live here at runtime, never in a host
+# .env. Activation is gated behind an owner session (NIL_PLAYGROUND_OWNER_TOKEN) — the registry token
+# and owner token stay server-side; neither is ever sent to the browser bundle. KNOWN DEBT: one
+# global cred set + one global active pointer — make session-scoped once there's a 2nd operator.
+REGISTRY: dict[str, str] = {
+    "cp_url": os.environ.get("NIL_REGISTRY_URL", ""),
+    "token": os.environ.get("NIL_REGISTRY_TOKEN", ""),
+    "workspace": os.environ.get("NIL_WORKSPACE", ""),
+    "owner_token": os.environ.get("NIL_PLAYGROUND_OWNER_TOKEN", ""),
+}
+# Cross-container URLs the MCP uses to reach this playground's shims (no public host port). The shims
+# must bind 0.0.0.0 (NIL_SHIM_HOST) for these to resolve from the mcp container.
+SELF_URLS: dict[str, str] = {
+    "odoo": os.environ.get("NIL_SELF_URL_ODOO", "http://nilscript-playground:8101"),
+    "live": os.environ.get("NIL_SELF_URL_LIVE", "http://nilscript-playground:8100"),
+}
+
 # Public-instance hardening (release plan §4). When PLAYGROUND_PUBLIC=1 (set by the hosted
 # /playground deploy), the demo runs locked down: no settings are persisted to disk (the LLM key
 # lives only in process memory for the session, never written), the default backend is the
@@ -945,6 +964,99 @@ class OdooIn(BaseModel):
     api_key: str = ""
 
 
+class OwnerIn(BaseModel):
+    token: str = ""
+
+
+# ── owner session + active-adapter registration ─────────────────────────────────────────────────
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.parse  # noqa: E402
+import urllib.request  # noqa: E402
+
+OWNER_COOKIE = "nil_owner"
+
+
+def _owner_cookie_value() -> str:
+    """A stable cookie value derived from the owner token — proves possession without exposing it."""
+    return hmac.new(REGISTRY["owner_token"].encode(), b"nil-owner-session", hashlib.sha256).hexdigest()
+
+
+def _is_owner(request: Request) -> bool:
+    """True only for a session that authenticated with the owner token (gates registry writes)."""
+    token = REGISTRY["owner_token"]
+    if not token:
+        return False
+    got = request.cookies.get(OWNER_COOKIE, "")
+    return bool(got) and hmac.compare_digest(got, _owner_cookie_value())
+
+
+def _registry_call(method: str, path: str, body: dict | None = None) -> int:
+    """Call the control-plane registry server-side with the registry bearer (never sent to a browser)."""
+    base = REGISTRY["cp_url"].rstrip("/")
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base + path, data=data, method=method)  # noqa: S310 - internal CP URL
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    if REGISTRY["token"]:
+        req.add_header("Authorization", f"Bearer {REGISTRY['token']}")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return 0
+
+
+def _activate_for_mcp(adapter_id: str, *, label: str, system: str) -> tuple[bool, str]:
+    """Register this playground's shim as `adapter_id` and make it the workspace's active MCP backend.
+    Server-side only; caller must have already verified the owner session."""
+    ws = REGISTRY["workspace"]
+    if not (REGISTRY["cp_url"] and ws):
+        return False, "registry not configured (set NIL_REGISTRY_URL + NIL_WORKSPACE)"
+    s = _registry_call("POST", "/adapters/register", {
+        "workspace": ws, "adapter_id": adapter_id, "label": label,
+        "url": SELF_URLS.get(adapter_id, ""), "bearer": BEARER, "system": system,
+    })
+    if s != 200:
+        return False, f"register failed ({s})"
+    s2 = _registry_call(
+        "POST", f"/adapters/{urllib.parse.quote(ws)}/{urllib.parse.quote(adapter_id)}/activate")
+    if s2 != 200:
+        return False, f"activate failed ({s2})"
+    return True, "active for the hosted MCP"
+
+
+@app.get("/api/owner")
+async def owner_status(request: Request):
+    """Whether owner mode is enabled (a token is configured) and whether this session is the owner."""
+    return {"enabled": bool(REGISTRY["owner_token"]), "owner": _is_owner(request)}
+
+
+@app.post("/api/owner/login")
+async def owner_login(creds: "OwnerIn"):
+    """Authenticate the owner with NIL_PLAYGROUND_OWNER_TOKEN → HttpOnly session cookie. The token is
+    sent once over TLS and never lives in the page bundle; the registry token stays server-side."""
+    token = REGISTRY["owner_token"]
+    if not token:
+        return JSONResponse({"ok": False, "message": "owner mode not enabled"}, status_code=400)
+    if not creds.token or not hmac.compare_digest(creds.token, token):
+        return JSONResponse({"ok": False, "message": "wrong owner token"}, status_code=401)
+    resp = JSONResponse({"ok": True, "owner": True})
+    resp.set_cookie(OWNER_COOKIE, _owner_cookie_value(), httponly=True, samesite="strict",
+                    secure=os.environ.get("PLAYGROUND_PUBLIC") == "1", max_age=43200)
+    return resp
+
+
+@app.post("/api/owner/logout")
+async def owner_logout():
+    resp = JSONResponse({"ok": True, "owner": False})
+    resp.delete_cookie(OWNER_COOKIE)
+    return resp
+
+
 @app.get("/api/odoo")
 async def get_odoo():
     """Current live-Odoo link (api key never returned)."""
@@ -953,9 +1065,12 @@ async def get_odoo():
 
 
 @app.post("/api/odoo")
-async def set_odoo(creds: OdooIn):
+async def set_odoo(creds: OdooIn, request: Request):
     """Link live Odoo CRM with your own keys (this session only). Blank fields keep the current
-    value. Verified before the running shim is touched — a bad change keeps the current link."""
+    value. Verified before the running shim is touched — a bad change keeps the current link.
+
+    If an OWNER session links it, the playground also registers + activates this Odoo shim in the
+    control plane so the hosted MCP routes to it (the only write path to the active backend)."""
     candidate = {
         "url": creds.url.strip() or ODOO_CREDS["url"],
         "db": creds.db.strip() or ODOO_CREDS["db"],
@@ -974,9 +1089,16 @@ async def set_odoo(creds: OdooIn):
     steps = await connect_checks("odoo") if ok2 else []
     emit_event("STATUS", f"Odoo {'linked' if ok2 else 'link failed'}", {"message": msg2},
                status="ok" if ok2 else "err", level="connect")
+    # Owner-gated: route the hosted MCP to this just-linked Odoo (anonymous links stay local-only).
+    mcp_active, mcp_message = False, ""
+    if ok2 and _is_owner(request):
+        mcp_active, mcp_message = _activate_for_mcp("odoo", label="Odoo CRM", system="odoo_crm")
+        emit_event("STATUS", f"MCP routing → Odoo {'on' if mcp_active else 'failed'}",
+                   {"message": mcp_message}, status="ok" if mcp_active else "err", level="connect")
     return {"ok": ok2, "message": msg2 if ok2 else f"verified, but {msg2}",
             "url": ODOO_CREDS["url"], "db": ODOO_CREDS["db"], "login": ODOO_CREDS["login"],
             "connected": _port_up(TARGETS["odoo"]["url"]), "steps": steps,
+            "mcp_active": mcp_active, "mcp_message": mcp_message,
             "skeleton": (SKELETON.get("odoo") or {}).get("targets", {})}
 
 
@@ -1275,6 +1397,7 @@ HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
 
     <div class=bform data-for=odoo>
      <p class=ptext>Link <b>live Odoo CRM</b> — your own keys, used only this session (never stored). Any future adapter links the same way.</p>
+     <div id=o_owner class=ptext style="display:none;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:0 0 10px"></div>
      <label>Odoo URL</label><input id=o_url placeholder="https://yourco.odoo.com">
      <label>Database</label><input id=o_db placeholder="yourco">
      <label>Login <span class=dim>(email)</span></label><input id=o_login placeholder="you@example.com">
@@ -1493,6 +1616,24 @@ async function loadOdoo(){
  const o=await (await fetch('/api/odoo')).json();
  $('#o_url').value=o.url||'';$('#o_db').value=o.db||'';$('#o_login').value=o.login||'';$('#o_key').value='';
  $('#o_status').innerHTML=o.connected?'status <b>connected</b>':'status <b>offline</b>';
+ ownerState();
+}
+async function ownerState(){
+ try{
+  const s=await (await fetch('/api/owner')).json();
+  const el=$('#o_owner'); if(!el)return;
+  if(!s.enabled){el.style.display='none';return;}
+  el.style.display='block';
+  el.innerHTML=s.owner
+   ? '✓ <b>Owner</b> — linking will route the hosted MCP to this backend. <a href=# id=o_logout>log out</a>'
+   : 'Linking stays local to this session. <a href=# id=o_login>Owner login</a> to also route the hosted MCP.';
+  const li=$('#o_login'); if(li)li.onclick=async(e)=>{e.preventDefault();
+   const t=prompt('Owner token'); if(!t)return;
+   const r=await (await fetch('/api/owner/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:t})})).json();
+   if(!r.ok)add('msg bot','owner login failed'); ownerState();};
+  const lo=$('#o_logout'); if(lo)lo.onclick=async(e)=>{e.preventDefault();
+   await fetch('/api/owner/logout',{method:'POST'}); ownerState();};
+ }catch(_){}
 }
 $('#o_save').onclick=async(e)=>{e.preventDefault();
  $('#o_status').innerHTML='<div class=kv>connecting to Odoo…</div>';
@@ -1509,9 +1650,10 @@ $('#o_save').onclick=async(e)=>{e.preventDefault();
    cap+=`<div class=cap><span class="cdot ${t.exists?'on':'bad'}"></span><b>${esc(n)}</b> <span class=t>${fs.length} fields</span><div class=flds>${fields}</div></div>`;}
   cap+=`</details>`;
  }
- $('#o_status').innerHTML=steps+`<div class=kv style=margin:6px 0>${r.ok?'✓ ':'✗ '}${esc(r.message)}</div>`+cap;
- if(r.ok){selectTarget('odoo');add('sys','Odoo CRM connected — switched to live Odoo CRM');}
- refreshHealth();
+ const mcp=r.mcp_active?`<div class=kv style="margin:6px 0;color:var(--ok)">◉ hosted MCP now routes to this Odoo (${esc(r.mcp_message||'')})</div>`:'';
+ $('#o_status').innerHTML=steps+`<div class=kv style=margin:6px 0>${r.ok?'✓ ':'✗ '}${esc(r.message)}</div>`+mcp+cap;
+ if(r.ok){selectTarget('odoo');add('sys','Odoo CRM connected — switched to live Odoo CRM'+(r.mcp_active?' · hosted MCP routed here':''));}
+ ownerState();refreshHealth();
 }
 
 // Commit history + rollback (audit trail tied to the SSOT)
