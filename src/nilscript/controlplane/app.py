@@ -93,78 +93,223 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>nilscript · control plane</title>
 <style>
-  :root{--bg:#0b0d10;--fg:#e8eaed;--mut:#8b949e;--line:#1c2128;--ok:#3fb950;--hi:#d29922;--crit:#f85149}
-  *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
-    font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
-  header{padding:18px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px}
-  h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.02em}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
-  .sub{color:var(--mut)}
-  table{width:100%;border-collapse:collapse}
-  th,td{text-align:left;padding:9px 22px;border-bottom:1px solid var(--line);white-space:nowrap}
-  th{color:var(--mut);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
-  td.verb{color:#79c0ff}
-  .pill{padding:1px 8px;border-radius:999px;font-size:12px;border:1px solid var(--line)}
-  .ex{color:var(--ok);border-color:var(--ok)} .pr{color:#79c0ff;border-color:#1f6feb}
-  .re{color:var(--crit);border-color:var(--crit)} .ro{color:var(--hi);border-color:var(--hi)}
-  .tier-HIGH{color:var(--hi)} .tier-CRITICAL{color:var(--crit)}
-  .src{color:var(--mut)} .empty{padding:40px 22px;color:var(--mut)}
-  #pending{padding:0}
-  .pcard{display:flex;align-items:center;gap:14px;padding:14px 22px;border-bottom:1px solid var(--line);
-    background:linear-gradient(90deg,rgba(210,153,34,.07),transparent)}
-  .pcard .grow{flex:1}.pcard .pv{color:#79c0ff;font-weight:600}.pcard .pp{color:var(--mut);font-size:13px}
-  .btn{padding:6px 14px;border-radius:7px;border:1px solid var(--line);background:transparent;
-    color:var(--fg);cursor:pointer;font:inherit}
-  .btn.ok{color:var(--ok);border-color:var(--ok)}.btn.no{color:var(--crit);border-color:var(--crit)}
-  .btn:hover{filter:brightness(1.3)}
-  .phead{padding:12px 22px;color:var(--hi);font-size:12px;text-transform:uppercase;letter-spacing:.04em;
-    border-bottom:1px solid var(--line);display:none}
+  :root{
+    --bg:#090b0f;--panel:#0f131a;--elev:#141a23;--line:#1d2530;--line2:#283142;
+    --fg:#e7eaf0;--mut:#8b94a6;--faint:#5a6373;
+    --blue:#5b8cff;--green:#46c266;--amber:#e0a629;--red:#fb5a4e;--violet:#a877f7;
+    --radius:14px;--mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:
+      radial-gradient(1200px 600px at 80% -10%,rgba(91,140,255,.10),transparent 60%),
+      radial-gradient(900px 500px at -10% 0%,rgba(168,119,247,.08),transparent 55%),var(--bg);
+    color:var(--fg);font:14px/1.55 var(--mono);min-height:100vh;
+    -webkit-font-smoothing:antialiased}
+  a{color:inherit}
+
+  /* ── header ── */
+  header{position:sticky;top:0;z-index:20;backdrop-filter:blur(10px);
+    background:linear-gradient(180deg,rgba(9,11,15,.92),rgba(9,11,15,.72));
+    border-bottom:1px solid var(--line);padding:14px clamp(14px,4vw,30px);
+    display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:.02em}
+  .brand b{font-weight:600}.brand .sl{color:var(--faint);font-weight:400}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--green);
+    box-shadow:0 0 0 0 rgba(70,194,102,.6);animation:pulse 2.4s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(70,194,102,.55)}70%{box-shadow:0 0 0 7px rgba(70,194,102,0)}100%{box-shadow:0 0 0 0 rgba(70,194,102,0)}}
+  .grow{flex:1 1 auto}
+  .chip{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border:1px solid var(--line2);
+    border-radius:999px;color:var(--mut);font-size:12px;white-space:nowrap}
+  .chip b{color:var(--fg)}
+  .live{color:var(--faint);font-size:12px;display:inline-flex;align-items:center;gap:6px}
+  .live i{width:5px;height:5px;border-radius:50%;background:var(--green);display:inline-block}
+
+  main{padding:clamp(14px,3vw,26px);max-width:1280px;margin:0 auto}
+  .sec-title{display:flex;align-items:center;gap:9px;margin:6px 2px 12px;
+    color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.09em}
+  .sec-title .n{color:var(--fg);background:var(--elev);border:1px solid var(--line2);
+    border-radius:999px;padding:1px 8px;font-size:11px}
+
+  /* ── pending approvals ── */
+  #pendingWrap{margin-bottom:26px;display:none}
+  #pending{display:grid;gap:12px}
+  .pcard{position:relative;border:1px solid var(--line2);border-radius:var(--radius);
+    background:linear-gradient(180deg,rgba(224,166,41,.10),rgba(224,166,41,.02)),var(--panel);
+    padding:16px 18px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;
+    box-shadow:0 1px 0 rgba(255,255,255,.02) inset,0 10px 30px -18px rgba(0,0,0,.8)}
+  .pcard::before{content:"";position:absolute;left:0;top:14px;bottom:14px;width:3px;border-radius:3px;background:var(--amber)}
+  .pcard .body{flex:1 1 260px;min-width:0}
+  .pcard .verb{font-size:15px;font-weight:600;color:#cfe0ff;word-break:break-word}
+  .pcard .prev{color:var(--mut);font-size:13px;margin-top:3px;word-break:break-word}
+  .pcard .meta{color:var(--faint);font-size:11.5px;margin-top:6px}
+  .pcard .actions{display:flex;gap:9px;flex:0 0 auto}
+
+  .btn{appearance:none;font:inherit;font-size:13px;cursor:pointer;border-radius:10px;
+    padding:9px 16px;border:1px solid var(--line2);background:var(--elev);color:var(--fg);
+    transition:transform .06s ease,filter .15s ease,background .15s ease;display:inline-flex;
+    align-items:center;gap:7px;white-space:nowrap}
+  .btn:hover{filter:brightness(1.15)}.btn:active{transform:translateY(1px)}
+  .btn.ok{border-color:rgba(70,194,102,.5);color:#bdf0cb;background:rgba(70,194,102,.12)}
+  .btn.no{border-color:rgba(251,90,78,.5);color:#ffc7c2;background:rgba(251,90,78,.10)}
+  .btn.ghost{background:transparent;color:var(--mut)}
+  .btn.ghost:hover{color:var(--fg);border-color:var(--line2)}
+  .btn.tiny{padding:5px 10px;font-size:12px;border-radius:8px}
+
+  /* ── timeline (responsive: table on desktop, cards on mobile) ── */
+  .feed{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--panel)}
+  .feed-head,.row{display:grid;grid-template-columns:84px 88px 130px minmax(160px,1fr) 92px 132px 1fr 110px;
+    align-items:center;gap:14px;padding:11px clamp(12px,2vw,18px)}
+  .feed-head{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.08em;
+    border-bottom:1px solid var(--line);background:rgba(255,255,255,.015);position:sticky;top:57px;z-index:5}
+  .row{border-bottom:1px solid var(--line);transition:background .12s ease}
+  .row:last-child{border-bottom:none}
+  .row:hover{background:rgba(91,140,255,.045)}
+  .t{color:var(--faint)} .src{color:var(--mut)} .ws{color:var(--faint)}
+  .verbcell{color:#9ec5ff;font-weight:500;word-break:break-word}
+  .pid{color:var(--faint);font-size:12px}
+  .ev{justify-self:start}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;
+    font-size:12px;border:1px solid var(--line2);white-space:nowrap}
+  .pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.9}
+  .ev-executed{color:var(--green);border-color:rgba(70,194,102,.35);background:rgba(70,194,102,.08)}
+  .ev-proposed{color:var(--blue);border-color:rgba(91,140,255,.35);background:rgba(91,140,255,.08)}
+  .ev-refused{color:var(--red);border-color:rgba(251,90,78,.35);background:rgba(251,90,78,.08)}
+  .ev-rolled_back{color:var(--amber);border-color:rgba(224,166,41,.35);background:rgba(224,166,41,.08)}
+  .tier{font-size:11px;padding:1px 8px;border-radius:6px;border:1px solid var(--line2);color:var(--mut)}
+  .tier.HIGH{color:#f0c674;border-color:rgba(224,166,41,.45);background:rgba(224,166,41,.07)}
+  .tier.CRITICAL{color:#ff9a90;border-color:rgba(251,90,78,.5);background:rgba(251,90,78,.10)}
+  .tier.MEDIUM{color:#9ec5ff;border-color:rgba(91,140,255,.3)}
+  .rowact{justify-self:end}
+  .rev{color:var(--violet);font-size:11px}
+
+  .empty{padding:54px 22px;text-align:center;color:var(--faint)}
+  .empty .big{font-size:15px;color:var(--mut);margin-bottom:4px}
+
+  /* toast */
+  #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(20px);
+    background:var(--elev);border:1px solid var(--line2);color:var(--fg);padding:11px 16px;
+    border-radius:11px;font-size:13px;opacity:0;pointer-events:none;transition:.25s;z-index:50;
+    box-shadow:0 18px 40px -16px rgba(0,0,0,.9)}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast b{color:var(--violet)}
+
+  @media(max-width:760px){
+    .feed-head{display:none}
+    .feed{border:none;background:transparent}
+    .row{grid-template-columns:1fr;gap:7px;border:1px solid var(--line);border-radius:12px;
+      background:var(--panel);padding:14px;margin-bottom:11px}
+    .row:hover{background:var(--panel)}
+    .row>*{justify-self:start!important}
+    .row>*[data-l]::before{content:attr(data-l);color:var(--faint);font-size:10.5px;
+      text-transform:uppercase;letter-spacing:.07em;display:block;margin-bottom:1px}
+    .rowact{width:100%}.rowact .btn{width:100%;justify-content:center}
+    .row .t[data-l]{order:-1;color:var(--mut)}
+  }
 </style></head><body>
-<header><span class=dot></span><h1>nilscript · control plane</h1>
-  <span class=sub id=meta>— one pane for every agent action</span></header>
-<div class=phead id=phead>⏳ pending approval — nothing commits until you decide</div>
-<section id=pending></section>
-<table><thead><tr><th>time</th><th>source</th><th>event</th><th>verb</th><th>tier</th>
-  <th>proposal</th><th>workspace</th></tr></thead><tbody id=rows></tbody></table>
-<div class=empty id=empty>waiting for events…</div>
+<header>
+  <span class=brand><span class=dot></span><b>nilscript</b><span class=sl>· control plane</span></span>
+  <span class=grow></span>
+  <span class=chip id=count><b>0</b>&nbsp;actions</span>
+  <span class=live><i></i> live</span>
+</header>
+
+<main>
+  <section id=pendingWrap>
+    <div class=sec-title>⏳ Awaiting your approval <span class=n id=pcount>0</span>
+      <span style="color:var(--faint);text-transform:none;letter-spacing:0">— nothing commits until you decide</span></div>
+    <div id=pending></div>
+  </section>
+
+  <div class=sec-title>Activity <span style="color:var(--faint);text-transform:none;letter-spacing:0">— every agent action, one pane</span></div>
+  <div class=feed>
+    <div class=feed-head>
+      <span>time</span><span>source</span><span>event</span><span>verb</span>
+      <span>tier</span><span>proposal</span><span>workspace</span><span style=justify-self:end>action</span>
+    </div>
+    <div id=rows></div>
+    <div class=empty id=empty><div class=big>Waiting for events…</div>
+      <div>Agent actions will stream in here as they happen.</div></div>
+  </div>
+</main>
+
+<div id=toast></div>
+
 <script>
-const cls={executed:'ex',proposed:'pr',refused:'re',rolled_back:'ro'};
+const EV={executed:'ev-executed',proposed:'ev-proposed',refused:'ev-refused',rolled_back:'ev-rolled_back'};
+const REVERSIBLE=new Set(['REVERSIBLE','COMPENSABLE']);
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function hhmmss(iso){const t=(iso||'').replace('T',' ');return t.slice(11,19)||'—';}
+function toast(html){const t=document.getElementById('toast');t.innerHTML=html;t.classList.add('show');
+  clearTimeout(toast._);toast._=setTimeout(()=>t.classList.remove('show'),2600);}
+
+async function copyRollback(token){
+  try{await navigator.clipboard.writeText(token);}catch(e){
+    const ta=document.createElement('textarea');ta.value=token;document.body.appendChild(ta);ta.select();
+    try{document.execCommand('copy');}catch(_){}ta.remove();}
+  toast('Rollback token copied — run <b>nil_rollback</b> with it in your agent to reverse this.');
+}
+
 async function tick(){
   try{
     const r=await fetch('/api/events?limit=200');const {events}=await r.json();
-    const tb=document.getElementById('rows');const em=document.getElementById('empty');
-    document.getElementById('meta').textContent='— '+events.length+' recent actions';
-    em.style.display=events.length?'none':'block';
-    tb.innerHTML=events.map(e=>{
-      const t=(e.received_at||'').replace('T',' ').slice(11,19);
-      const ev=e.event||e.performative||'';const c=cls[ev]||'pr';
-      return `<tr><td>${t}</td><td class=src>${e.source||''}</td>`+
-        `<td><span class="pill ${c}">${ev}</span></td>`+
-        `<td class=verb>${e.verb||''}</td>`+
-        `<td class="tier-${e.tier||''}">${e.tier||''}</td>`+
-        `<td class=src>${(e.proposal||'').slice(0,10)}</td>`+
-        `<td class=src>${e.workspace||''}</td></tr>`;
+    const rows=document.getElementById('rows'),empty=document.getElementById('empty');
+    document.getElementById('count').innerHTML='<b>'+events.length+'</b>&nbsp;actions';
+    empty.style.display=events.length?'none':'block';
+    rows.innerHTML=events.map(e=>{
+      const ev=e.event||e.performative||'';const cls=EV[ev]||'ev-proposed';
+      const canRoll=ev==='executed'&&e.compensation_token&&REVERSIBLE.has(e.reversibility);
+      const tier=e.tier?`<span class="tier ${esc(e.tier)}">${esc(e.tier)}</span>`:'';
+      const act=canRoll
+        ? `<button class="btn tiny ghost" title="Reversible (${esc(e.reversibility)})" onclick="copyRollback('${esc(e.compensation_token)}')">⤺ rollback</button>`
+        : (e.reversibility?`<span class=rev title="${esc(e.reversibility)}">${e.reversibility==='IRREVERSIBLE'?'— final':''}</span>`:'');
+      return `<div class=row>
+        <span class=t data-l=time title="${esc(e.received_at)}">${hhmmss(e.received_at)}</span>
+        <span class=src data-l=source>${esc(e.source||'')}</span>
+        <span class=ev data-l=event><span class="pill ${cls}">${esc(ev)}</span></span>
+        <span class=verbcell data-l=verb>${esc(e.verb||'')}</span>
+        <span data-l=tier>${tier}</span>
+        <span class=pid data-l=proposal>${esc((e.proposal||'').slice(0,10))}</span>
+        <span class=ws data-l=workspace>${esc(e.workspace||'—')}</span>
+        <span class=rowact data-l=action>${act}</span>
+      </div>`;
     }).join('');
   }catch(_){}
 }
+
 async function decide(id,status){
-  await fetch('/proposals/'+id+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({status})});
+  try{
+    await fetch('/proposals/'+id+'/decision',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});
+    toast(status==='approved'?'Approved — the commit will proceed.':'Rejected — the write will not commit.');
+  }catch(_){toast('Could not record the decision.');}
   pend();tick();
 }
+
 async function pend(){
   try{
     const r=await fetch('/api/pending');const {pending}=await r.json();
-    const sec=document.getElementById('pending');document.getElementById('phead').style.display=pending.length?'block':'none';
+    const wrap=document.getElementById('pendingWrap'),sec=document.getElementById('pending');
+    document.getElementById('pcount').textContent=pending.length;
+    wrap.style.display=pending.length?'block':'none';
     sec.innerHTML=pending.map(p=>{
-      let pv='';try{const o=JSON.parse(p.preview);pv=(o&&(o.en||o.ar))||'';}catch(_){}
-      return `<div class=pcard><div class=grow><span class=pv>${p.verb||''}</span> `+
-        `<span class="pill tier-${p.tier||''}">${p.tier||''}</span><div class=pp>${pv} · ${(p.proposal_id||'').slice(0,12)}</div></div>`+
-        `<button class="btn ok" onclick="decide('${p.proposal_id}','approved')">Approve</button>`+
-        `<button class="btn no" onclick="decide('${p.proposal_id}','rejected')">Reject</button></div>`;
+      let prev='';try{const o=JSON.parse(p.preview);prev=(o&&(o.en||o.ar))||'';}catch(_){prev=p.preview||'';}
+      const tier=p.tier?`<span class="tier ${esc(p.tier)}">${esc(p.tier)}</span>`:'';
+      return `<div class=pcard>
+        <div class=body>
+          <div class=verb>${esc(p.verb||'action')} ${tier}</div>
+          ${prev?`<div class=prev>${esc(prev)}</div>`:''}
+          <div class=meta>proposal ${esc((p.proposal_id||'').slice(0,12))}</div>
+        </div>
+        <div class=actions>
+          <button class="btn ok" onclick="decide('${esc(p.proposal_id)}','approved')">✓ Approve</button>
+          <button class="btn no" onclick="decide('${esc(p.proposal_id)}','rejected')">✕ Reject</button>
+        </div>
+      </div>`;
     }).join('');
   }catch(_){}
 }
+
 tick();pend();setInterval(()=>{tick();pend();},2000);
 </script></body></html>"""
 

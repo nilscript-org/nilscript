@@ -105,10 +105,29 @@ class EventStore:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT received_at, workspace, sequence, grant_id, source, performative, "
-                "event, proposal, verb, tier, severity FROM events ORDER BY id DESC LIMIT ?",
+                "event, proposal, verb, tier, severity, envelope FROM events ORDER BY id DESC LIMIT ?",
                 (max(1, min(limit, 1000)),),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            envelope = record.pop("envelope", None)
+            # Surface the compensation handle for an executed write so the UI can offer a rollback
+            # affordance on exactly the reversible rows (and nothing else).
+            reversibility, token = None, None
+            if envelope:
+                try:
+                    comp = (
+                        ((json.loads(envelope).get("body") or {}).get("result") or {}).get("compensation") or {}
+                    )
+                    reversibility = comp.get("reversibility")
+                    token = comp.get("token")
+                except (ValueError, TypeError):
+                    pass
+            record["reversibility"] = reversibility
+            record["compensation_token"] = token
+            out.append(record)
+        return out
 
     def count(self) -> int:
         with self._lock:

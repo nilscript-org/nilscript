@@ -16,6 +16,7 @@ touch what your backend actually exposes. Hallucinations can't write. *OpenAPI f
 [![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)](https://www.python.org/)
 [![spec](https://img.shields.io/badge/NIL-0.3.0-5b5bd6)](https://github.com/nilscript-org/nilscript-protocol/blob/main/nil/0.2.0.md)
 [![license](https://img.shields.io/badge/license-Apache--2.0%20AND%20CC--BY--4.0-444)](LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20774491.svg)](https://doi.org/10.5281/zenodo.20774491)
 
 [Why](#why-this-exists) · [The numbers](#benchmarks--the-numbers) · [Quickstart](#quickstart) · [Commands](#command-tour) · [How it works](#how-it-works) · [Build an adapter](docs/contributing-an-adapter.md) · [Status](#where-it-stands)
 
@@ -198,6 +199,24 @@ OpenAPI / JSON-Schema model).
 - ✅ **Live proof** — a real customer + invoice into a live ERPNext, from the standard alone; the reference Playground drives a live PocketBase end-to-end.
 - 🚧 **Young open standard** — not yet battle-tested at merchant scale. We lead with the proof, not traction claims.
 - 🚧 **PyPI publish** staged; install from source for 0.3.0 until it lands.
+
+## Paper & citation
+
+NIL is described in a published paper — *Unexpressible, Not Filtered: A Structural Framework for
+Governing AI-Agent Actions — the Network Intent Layer* (ElBasheir A. M. Elkhider, 2026),
+archived on Zenodo with a permanent DOI: **[10.5281/zenodo.20774491](https://doi.org/10.5281/zenodo.20774491)**.
+
+If you use or reference NIL, please cite it:
+
+```bibtex
+@misc{elkhider2026nil,
+  title  = {Unexpressible, Not Filtered: A Structural Framework for Governing AI-Agent Actions --- the Network Intent Layer},
+  author = {Elkhider, ElBasheir A. M.},
+  year   = {2026},
+  doi    = {10.5281/zenodo.20774491},
+  url    = {https://doi.org/10.5281/zenodo.20774491}
+}
+```
 
 ## Contributing & community
 
