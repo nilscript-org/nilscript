@@ -92,13 +92,26 @@ def create_app(store: EventStore | None = None, *, secret: str | None = None) ->
 _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>nilscript · control plane</title>
+<script>(function(){try{var t=localStorage.getItem('cp-theme')||(window.matchMedia&&matchMedia('(prefers-color-scheme:light)').matches?'light':'dark');document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();</script>
 <style>
   :root{
-    --bg:#090b0f;--panel:#0f131a;--elev:#141a23;--line:#1d2530;--line2:#283142;
-    --fg:#e7eaf0;--mut:#8b94a6;--faint:#5a6373;
     --blue:#5b8cff;--green:#46c266;--amber:#e0a629;--red:#fb5a4e;--violet:#a877f7;
     --radius:14px;--mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
   }
+  :root,:root[data-theme=dark]{
+    --bg:#090b0f;--panel:#0f131a;--elev:#141a23;--line:#1d2530;--line2:#283142;
+    --fg:#e7eaf0;--mut:#8b94a6;--faint:#5a6373;
+    --header-bg:rgba(9,11,15,.82);--verb:#9ec5ff;--verb-strong:#cfe0ff;--rowhover:rgba(91,140,255,.05)}
+  :root[data-theme=light]{
+    --bg:#f5f7fa;--panel:#ffffff;--elev:#eef1f5;--line:#e4e8ee;--line2:#d6dde6;
+    --fg:#1b2230;--mut:#586374;--faint:#97a1b1;
+    --blue:#2f6bff;--green:#1f9e44;--amber:#a9760f;--red:#db3a2f;--violet:#7a45d3;
+    --header-bg:rgba(255,255,255,.85);--verb:#2f5bd0;--verb-strong:#2247b8;--rowhover:rgba(47,107,255,.06)}
+  @media(prefers-color-scheme:light){:root:not([data-theme]){
+    --bg:#f5f7fa;--panel:#ffffff;--elev:#eef1f5;--line:#e4e8ee;--line2:#d6dde6;
+    --fg:#1b2230;--mut:#586374;--faint:#97a1b1;
+    --blue:#2f6bff;--green:#1f9e44;--amber:#a9760f;--red:#db3a2f;--violet:#7a45d3;
+    --header-bg:rgba(255,255,255,.85);--verb:#2f5bd0;--verb-strong:#2247b8;--rowhover:rgba(47,107,255,.06)}}
   *{box-sizing:border-box}
   html{-webkit-text-size-adjust:100%}
   body{margin:0;background:
@@ -110,7 +123,7 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
 
   /* ── header ── */
   header{position:sticky;top:0;z-index:20;backdrop-filter:blur(10px);
-    background:linear-gradient(180deg,rgba(9,11,15,.92),rgba(9,11,15,.72));
+    background:var(--header-bg);
     border-bottom:1px solid var(--line);padding:14px clamp(14px,4vw,30px);
     display:flex;align-items:center;gap:14px;flex-wrap:wrap}
   .brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:.02em}
@@ -140,7 +153,7 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
     box-shadow:0 1px 0 rgba(255,255,255,.02) inset,0 10px 30px -18px rgba(0,0,0,.8)}
   .pcard::before{content:"";position:absolute;left:0;top:14px;bottom:14px;width:3px;border-radius:3px;background:var(--amber)}
   .pcard .body{flex:1 1 260px;min-width:0}
-  .pcard .verb{font-size:15px;font-weight:600;color:#cfe0ff;word-break:break-word}
+  .pcard .verb{font-size:15px;font-weight:600;color:var(--verb-strong);word-break:break-word}
   .pcard .prev{color:var(--mut);font-size:13px;margin-top:3px;word-break:break-word}
   .pcard .meta{color:var(--faint);font-size:11.5px;margin-top:6px}
   .pcard .actions{display:flex;gap:9px;flex:0 0 auto}
@@ -164,9 +177,9 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
     border-bottom:1px solid var(--line);background:rgba(255,255,255,.015);position:sticky;top:57px;z-index:5}
   .row{border-bottom:1px solid var(--line);transition:background .12s ease}
   .row:last-child{border-bottom:none}
-  .row:hover{background:rgba(91,140,255,.045)}
+  .row:hover{background:var(--rowhover)}
   .t{color:var(--faint)} .src{color:var(--mut)} .ws{color:var(--faint)}
-  .verbcell{color:#9ec5ff;font-weight:500;word-break:break-word}
+  .verbcell{color:var(--verb);font-weight:500;word-break:break-word}
   .pid{color:var(--faint);font-size:12px}
   .ev{justify-self:start}
   .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;
@@ -212,6 +225,7 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
   <span class=grow></span>
   <span class=chip id=count><b>0</b>&nbsp;actions</span>
   <span class=live><i></i> live</span>
+  <button class="btn tiny ghost" id=themeBtn title="Toggle light / dark" aria-label="Toggle theme" onclick=toggleTheme()>☾</button>
 </header>
 
 <main>
@@ -310,7 +324,9 @@ async function pend(){
   }catch(_){}
 }
 
-tick();pend();setInterval(()=>{tick();pend();},2000);
+function applyThemeGlyph(){var b=document.getElementById('themeBtn');if(b)b.textContent=document.documentElement.getAttribute('data-theme')==='light'?'☀':'☾';}
+function toggleTheme(){var next=document.documentElement.getAttribute('data-theme')==='light'?'dark':'light';document.documentElement.setAttribute('data-theme',next);try{localStorage.setItem('cp-theme',next);}catch(e){}applyThemeGlyph();}
+tick();pend();applyThemeGlyph();setInterval(()=>{tick();pend();},2000);
 </script></body></html>"""
 
 
