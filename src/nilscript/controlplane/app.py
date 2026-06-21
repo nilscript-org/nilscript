@@ -259,6 +259,8 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
   .row:hover{background:var(--rowhover)}
   .t{color:var(--faint)} .src{color:var(--mut)} .ws{color:var(--faint)}
   .verbcell{color:var(--verb);font-weight:500;word-break:break-word}
+  .vdetail{display:block;color:var(--faint);font-weight:400;font-size:11px;margin-top:2px;word-break:break-word}
+  .vdetail b{color:var(--mut);font-weight:500}
   .pid{color:var(--faint);font-size:12px}
   .ev{justify-self:start}
   .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;
@@ -389,6 +391,7 @@ async function tick(){
       const ev=e.event||e.performative||'';const cls=EV[ev]||'ev-proposed';
       const canRoll=ev==='executed'&&e.compensation_token&&REVERSIBLE.has(e.reversibility);
       const tier=e.tier?`<span class="tier ${esc(e.tier)}">${esc(e.tier)}</span>`:'';
+      const detail=[e.system?`<b>${esc(e.system)}</b>`:'',esc(e.summary||'')].filter(Boolean).join(' · ');
       const act=canRoll
         ? `<button class="btn tiny ghost" title="Reversible (${esc(e.reversibility)})" onclick="copyRollback('${esc(e.compensation_token)}')">⤺ rollback</button>`
         : (e.reversibility?`<span class=rev title="${esc(e.reversibility)}">${e.reversibility==='IRREVERSIBLE'?'— final':''}</span>`:'');
@@ -396,7 +399,7 @@ async function tick(){
         <span class=t data-l=time title="${esc(e.received_at)}">${hhmmss(e.received_at)}</span>
         <span class=src data-l=source>${esc(e.source||'')}</span>
         <span class=ev data-l=event><span class="pill ${cls}">${esc(ev)}</span></span>
-        <span class=verbcell data-l=verb>${esc(e.verb||'')}</span>
+        <span class=verbcell data-l=verb>${esc(e.verb||'—')}${detail?`<span class=vdetail>${detail}</span>`:''}</span>
         <span data-l=tier>${tier}</span>
         <span class=pid data-l=proposal>${esc((e.proposal||'').slice(0,10))}</span>
         <span class=ws data-l=workspace>${esc(e.workspace||'—')}</span>

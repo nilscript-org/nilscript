@@ -238,6 +238,27 @@ def test_active_endpoint_404_when_none_active() -> None:
     assert client.get("/adapters/active?workspace=ws1").status_code == 404
 
 
+def test_recent_enriches_executed_event_with_entity_detail() -> None:
+    # An executed event omits verb/tier from the body (they live on the proposal) but carries a
+    # rich result.entity + ssot — the timeline must derive verb + surface system/entity, not show blank.
+    s = _store()
+    env = {
+        "nil": "0.1", "id": "ex1", "performative": "EVENT", "grant": "odoo", "workspace": "owner",
+        "body": {"event": "executed", "severity": "info", "proposal": "p9", "result": {
+            "claim": "success", "changed": True,
+            "entity": {"type": "crm.create_lead", "id": "42", "url": "/leads/42"},
+            "ssot": {"system": "odoo_crm"},
+            "compensation": {"reversibility": "REVERSIBLE", "token": "tok42"}}},
+    }
+    assert s.ingest(env, 1) is True
+    row = s.recent()[0]
+    assert row["verb"] == "crm.create_lead"          # derived from result.entity.type
+    assert row["system"] == "odoo_crm"               # surfaced from ssot
+    assert row["entity_id"] == "42" and row["entity_url"] == "/leads/42"
+    assert row["summary"] == "leads/42"              # human one-liner
+    assert row["reversibility"] == "REVERSIBLE" and row["compensation_token"] == "tok42"
+
+
 def test_registry_view_is_public_and_redacted(monkeypatch) -> None:
     monkeypatch.setenv("NIL_WORKSPACE", "owner")
     s = _store()
