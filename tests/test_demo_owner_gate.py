@@ -1,4 +1,4 @@
-"""Playground owner session gates active-adapter registration (dashboard-driven MCP routing)."""
+"""Playground owner session: auto-issued per session (never prompts), gates active-adapter routing."""
 
 import pytest
 
@@ -12,31 +12,43 @@ import nilscript.demo.demo_ui as ui  # noqa: E402
 
 @pytest.fixture()
 def client(monkeypatch):
-    monkeypatch.setitem(ui.REGISTRY, "owner_token", "ownsecret")
+    monkeypatch.setitem(ui.REGISTRY, "owner_token", "server-signing-secret")
     monkeypatch.setitem(ui.REGISTRY, "cp_url", "https://cp.test")
     monkeypatch.setitem(ui.REGISTRY, "token", "regtok")
     monkeypatch.setitem(ui.REGISTRY, "workspace", "owner")
     return TestClient(ui.app)
 
 
-def test_owner_disabled_when_no_token(monkeypatch):
+def test_owner_disabled_when_no_secret(monkeypatch):
     monkeypatch.setitem(ui.REGISTRY, "owner_token", "")
     c = TestClient(ui.app)
     assert c.get("/api/owner").json() == {"enabled": False, "owner": False}
-    assert c.post("/api/owner/login", json={"token": "x"}).status_code == 400
 
 
-def test_owner_login_wrong_token_rejected(client):
-    assert client.post("/api/owner/login", json={"token": "nope"}).status_code == 401
-    assert client.get("/api/owner").json()["owner"] is False
-
-
-def test_owner_login_sets_session_and_logout_clears(client):
-    r = client.post("/api/owner/login", json={"token": "ownsecret"})
-    assert r.status_code == 200 and r.json()["owner"] is True
+def test_owner_auto_issued_no_prompt(client):
+    # Loading the dashboard auto-grants an owner session — never asks for a token.
+    r = client.get("/api/owner").json()
+    assert r["enabled"] is True and r["owner"] is True
+    # cookie minted and sticks across calls
+    assert ui.OWNER_COOKIE in client.cookies
     assert client.get("/api/owner").json()["owner"] is True
-    client.post("/api/owner/logout")
-    assert client.get("/api/owner").json()["owner"] is False
+
+
+def test_each_session_gets_a_distinct_token(client):
+    c1, c2 = TestClient(ui.app), TestClient(ui.app)
+    c1.get("/api/owner")
+    c2.get("/api/owner")
+    t1, t2 = c1.cookies.get(ui.OWNER_COOKIE), c2.cookies.get(ui.OWNER_COOKIE)
+    assert t1 and t2 and t1 != t2  # a fresh per-session token, not a shared one
+
+
+def test_is_owner_rejects_forged_or_missing_cookie(client):
+    class _Req:
+        cookies = {ui.OWNER_COOKIE: "deadbeef.notavalidsig"}
+    assert ui._is_owner(_Req()) is False
+    class _Bare:
+        cookies = {}
+    assert ui._is_owner(_Bare()) is False
 
 
 def test_activate_for_mcp_registers_then_activates(monkeypatch):
@@ -48,8 +60,7 @@ def test_activate_for_mcp_registers_then_activates(monkeypatch):
     monkeypatch.setattr(ui, "_registry_call", lambda m, p, b=None: (calls.append((m, p, b)) or 200))
     ok, _ = ui._activate_for_mcp("odoo", label="Odoo CRM", system="odoo_crm")
     assert ok is True
-    assert calls[0][0] == "POST" and calls[0][1] == "/adapters/register"
-    assert calls[0][2]["url"] == "http://nilscript-playground:8101" and calls[0][2]["bearer"] == ui.BEARER
+    assert calls[0][1] == "/adapters/register" and calls[0][2]["url"] == "http://nilscript-playground:8101"
     assert calls[1][1] == "/adapters/owner/odoo/activate"
 
 
@@ -59,7 +70,7 @@ def test_activate_for_mcp_unconfigured_is_noop(monkeypatch):
     assert ok is False and "registry not configured" in msg
 
 
-def test_odoo_link_activates_only_for_owner(client, monkeypatch):
+def test_odoo_link_activates_for_auto_owner_session(client, monkeypatch):
     monkeypatch.setattr(ui, "verify_odoo", lambda c: (True, "ok"))
     monkeypatch.setattr(ui, "spawn_odoo", lambda restart=False: (True, "up"))
     monkeypatch.setattr(ui, "_port_up", lambda u: True)
@@ -72,12 +83,6 @@ def test_odoo_link_activates_only_for_owner(client, monkeypatch):
     monkeypatch.setattr(ui, "_activate_for_mcp",
                         lambda *a, **k: (activated.append(a) or (True, "on")))
 
-    body = {"url": "https://o", "db": "d", "login": "l", "api_key": "k"}
-    # Anonymous link: shim runs locally, but the MCP is NOT repointed.
-    r = client.post("/api/odoo", json=body).json()
-    assert r["ok"] is True and r["mcp_active"] is False and activated == []
-
-    # Owner session: the just-linked Odoo becomes the MCP's active backend.
-    client.post("/api/owner/login", json={"token": "ownsecret"})
-    r2 = client.post("/api/odoo", json=body).json()
-    assert r2["mcp_active"] is True and len(activated) == 1
+    client.get("/api/owner")  # auto-issues the owner cookie (no prompt)
+    r = client.post("/api/odoo", json={"url": "https://o", "db": "d", "login": "l", "api_key": "k"}).json()
+    assert r["ok"] is True and r["mcp_active"] is True and len(activated) == 1
