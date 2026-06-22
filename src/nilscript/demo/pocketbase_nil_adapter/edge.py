@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import uuid4
@@ -29,6 +30,27 @@ SYSTEM = "pocketbase"
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+_HTML_TAG = re.compile(r"<[^>]+>")
+
+
+def _field_landed(actual: Any, intended: Any) -> bool:
+    """Did the SSOT actually take the intended value? Tolerates backend normalization but treats
+    empty/false-where-a-value-was-intended as a hard miss — the signature of a silently dropped write."""
+    if actual == intended:
+        return True
+    intended_s = str(intended).strip() if intended is not None else ""
+    if not intended_s:
+        return True
+    actual_s = _HTML_TAG.sub("", str(actual if actual not in (None, False) else "")).strip()
+    return intended_s == actual_s or intended_s in actual_s
+
+
+def _verify_write(client: SystemClient, target: str, record_id: str, native: dict[str, Any]) -> list[str]:
+    """Read the record back from the SSOT; return written fields that did NOT land (empty => verified)."""
+    after = client.get(target, record_id) or {}
+    return [field for field, value in native.items() if not _field_landed(after.get(field), value)]
 
 
 def _resource_phrase(op: str, target: str, args: dict[str, Any]) -> tuple[str, str]:
@@ -231,10 +253,20 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             tok = uuid4().hex[:16]  # ROLLBACK this token to preview the synthesized reversal
             state.compensations[tok] = {"resource": True, "rev_verb": rev_verb, "rev_args": rev_args}
             comp_block["token"] = tok
-            result = {"claim": "success", "changed": True, "verified": True,
+            # EARN verified: create/update re-read and compare `data`; delete confirms absence.
+            if op == "delete":
+                unverified, verified = [], client.get(target, rid) is None
+            else:
+                unverified = _verify_write(client, target, rid, data)
+                verified = not unverified
+            ssot = {"system": SYSTEM, "read_after_write": True}
+            if unverified:
+                ssot["unverified_fields"] = unverified
+            result = {"claim": "success" if verified else "partial", "changed": True, "verified": verified,
                       "entity": {"type": stored["verb"], "id": rid, "url": f"/{target}/{rid}"},
-                      "ssot": {"system": SYSTEM, "read_after_write": True},
-                      "compensation": comp_block}
+                      "ssot": ssot, "compensation": comp_block}
+            if unverified:
+                result["unverified_fields"] = unverified
             status_body = {"proposal": proposal_id, "state": "executed", "replayed": False,
                            "compensation": comp_block, "result": result}
             state.ledger[key] = status_body
@@ -267,13 +299,28 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             return _envelope("STATUS", env, {"proposal": proposal_id, "state": "failed_terminal", "replayed": False})
         reversibility = COMPENSATIONS.get(stored["verb"], {}).get("reversibility", "IRREVERSIBLE")
         status_body = {"proposal": proposal_id, "state": "executed", "replayed": False}
+        # EARN verified — re-read the SSOT and confirm the written fields landed; never assert it.
+        fields_written = {} if action.startswith("delete_") else native
+        effect_id = str(created.get("id") or created.get("name") or "")
+        if action.startswith("delete_"):
+            unverified, verified = [], client.get(verb.doctype, effect_id) is None
+        elif fields_written and effect_id:
+            unverified = _verify_write(client, verb.doctype, effect_id, fields_written)
+            verified = not unverified
+        else:
+            unverified, verified = [], True
+        ssot: dict[str, Any] = {"system": SYSTEM, "read_after_write": True}
+        if unverified:
+            ssot["unverified_fields"] = unverified
         result = {
-            "claim": "success",
+            "claim": "success" if verified else "partial",
             "changed": True,
-            "verified": True,
+            "verified": verified,
             "entity": entity_ref(verb, created),
-            "ssot": {"system": SYSTEM, "read_after_write": True},
+            "ssot": ssot,
         }
+        if unverified:
+            result["unverified_fields"] = unverified
         comp_block = {"reversibility": reversibility}  # every effect declares its reversibility honestly
         if reversibility != "IRREVERSIBLE":  # mint a reversal handle the owner/agent can ROLLBACK
             comp_token = uuid4().hex[:16]
