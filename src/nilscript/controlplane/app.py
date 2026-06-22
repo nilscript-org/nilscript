@@ -77,6 +77,15 @@ def create_app(
     def events(limit: int = 100) -> dict[str, Any]:
         return {"events": store.recent(limit)}
 
+    @app.get("/api/events/{event_id}")
+    def event_detail(event_id: int) -> Any:
+        """The full payload journey for one row — intent → resolution → field-level SSOT verdict →
+        effect — fetched lazily when the operator expands a row."""
+        detail = store.detail(event_id)
+        if detail is None:
+            return JSONResponse({"error": "no such event"}, status_code=404)
+        return detail
+
     # ── human-approval gate (Phase 2) ────────────────────────────────────────────────────────
     @app.post("/proposals/{proposal_id}/await")
     def await_approval(proposal_id: str) -> dict[str, Any]:
@@ -250,13 +259,16 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
 
   /* ── timeline (responsive: table on desktop, cards on mobile) ── */
   .feed{border:1px solid var(--line);border-radius:var(--radius);overflow-x:auto;background:var(--panel)}
-  .feed-head,.row{display:grid;grid-template-columns:78px 80px 120px minmax(150px,1.4fr) 84px 116px minmax(80px,1fr) 104px;
-    align-items:center;gap:12px;padding:8px clamp(12px,2vw,16px);min-width:760px}
+  .feed-head,.row{display:grid;grid-template-columns:74px 76px 104px 96px minmax(140px,1.3fr) 72px 104px minmax(72px,.9fr) 100px;
+    align-items:center;gap:12px;padding:8px clamp(12px,2vw,16px);min-width:880px}
   .feed-head{color:var(--faint);font-size:11px;text-transform:uppercase;letter-spacing:.08em;
     border-bottom:1px solid var(--line);background:var(--elev)}
-  .row{border-bottom:1px solid var(--line);transition:background .12s ease}
+  .row{border-bottom:1px solid var(--line);transition:background .12s ease;cursor:pointer}
   .row:last-child{border-bottom:none}
   .row:hover{background:var(--rowhover)}
+  .row.sel{background:var(--rowhover)}
+  .row .caret{color:var(--faint);transition:transform .15s ease;display:inline-block}
+  .row.sel .caret{transform:rotate(90deg);color:var(--verb)}
   .t{color:var(--faint)} .src{color:var(--mut)} .ws{color:var(--faint)}
   .verbcell{color:var(--verb);font-weight:500;word-break:break-word}
   .vdetail{display:block;color:var(--faint);font-weight:400;font-size:11px;margin-top:2px;word-break:break-word}
@@ -276,6 +288,42 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
   .tier.MEDIUM{color:#9ec5ff;border-color:rgba(91,140,255,.3)}
   .rowact{justify-self:end}
   .rev{color:var(--violet);font-size:11px}
+
+  /* ── verified column: the SSOT read-back verdict, not the commit's say-so ── */
+  .vf{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:1px 8px;border-radius:6px;
+    border:1px solid var(--line2);white-space:nowrap}
+  .vf.verified{color:var(--green);border-color:rgba(70,194,102,.35);background:rgba(70,194,102,.07)}
+  .vf.partial{color:#f0c674;border-color:rgba(224,166,41,.5);background:rgba(224,166,41,.10);font-weight:600}
+  .vf.failed{color:#ff9a90;border-color:rgba(251,90,78,.55);background:rgba(251,90,78,.12);font-weight:600}
+  .vf-na{color:var(--faint)}
+
+  /* ── expanded row: the full payload journey ── */
+  .exp{display:none;min-width:880px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,rgba(91,140,255,.045),transparent 120px),var(--elev)}
+  .exp.open{display:block;padding:6px clamp(12px,2vw,20px) 18px}
+  .exp-load{color:var(--faint);padding:16px 4px}
+  .dsec{margin-top:14px}
+  .dsec>.h{color:var(--mut);font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;
+    margin:0 0 7px;display:flex;align-items:center;gap:8px}
+  .dsec>.h::after{content:"";flex:1;height:1px;background:var(--line)}
+  .facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px 18px}
+  .fact{min-width:0}
+  .fact .k{color:var(--faint);font-size:11px}
+  .fact .v{color:var(--fg);word-break:break-word}
+  .fact .v.mut{color:var(--mut)}
+  /* field-level diff table — the heart of the expansion */
+  .ftable{width:100%;border-collapse:collapse;font-size:12.5px}
+  .ftable th{text-align:left;color:var(--faint);font-weight:500;font-size:10.5px;text-transform:uppercase;
+    letter-spacing:.06em;padding:5px 10px;border-bottom:1px solid var(--line)}
+  .ftable td{padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top;word-break:break-word}
+  .ftable tr:last-child td{border-bottom:none}
+  .ftable .fname{color:var(--verb)}
+  .ftable .ok{color:var(--green)} .ftable .drop{color:#ff9a90;font-weight:600}
+  .ftable tr.dropped{background:rgba(251,90,78,.06)}
+  .dnote{color:var(--faint);font-size:11px;margin-top:7px}
+  .draw{margin:0;padding:11px 13px;background:var(--bg);border:1px solid var(--line);border-radius:9px;
+    font-size:11.5px;color:var(--mut);overflow:auto;max-height:340px;white-space:pre;line-height:1.5}
+  .copybtn{margin-bottom:7px}
 
   .empty{padding:54px 22px;text-align:center;color:var(--faint)}
   .empty .big{font-size:15px;color:var(--mut);margin-bottom:4px}
@@ -355,7 +403,7 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
   <div class=sec-title>Activity <span style="color:var(--faint);text-transform:none;letter-spacing:0">— every agent action, one pane</span></div>
   <div class=feed>
     <div class=feed-head>
-      <span>time</span><span>source</span><span>event</span><span>verb</span>
+      <span>time</span><span>source</span><span>event</span><span>verified</span><span>verb</span>
       <span>tier</span><span>proposal</span><span>workspace</span><span style=justify-self:end>action</span>
     </div>
     <div id=rows></div>
@@ -369,6 +417,7 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <script>
 const EV={executed:'ev-executed',proposed:'ev-proposed',refused:'ev-refused',rolled_back:'ev-rolled_back'};
 const REVERSIBLE=new Set(['REVERSIBLE','COMPENSABLE']);
+const VFG={verified:'✓',partial:'⚠',failed:'✗'};
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function hhmmss(iso){const t=(iso||'').replace('T',' ');return t.slice(11,19)||'—';}
 function toast(html){const t=document.getElementById('toast');t.innerHTML=html;t.classList.add('show');
@@ -392,21 +441,120 @@ async function tick(){
       const canRoll=ev==='executed'&&e.compensation_token&&REVERSIBLE.has(e.reversibility);
       const tier=e.tier?`<span class="tier ${esc(e.tier)}">${esc(e.tier)}</span>`:'';
       const detail=[e.system?`<b>${esc(e.system)}</b>`:'',esc(e.summary||'')].filter(Boolean).join(' · ');
+      const vf=e.verify?`<span class="vf ${esc(e.verify)}">${VFG[e.verify]||''} ${esc(e.verify)}</span>`:'<span class=vf-na>—</span>';
       const act=canRoll
-        ? `<button class="btn tiny ghost" title="Reversible (${esc(e.reversibility)})" onclick="copyRollback('${esc(e.compensation_token)}')">⤺ rollback</button>`
+        ? `<button class="btn tiny ghost" title="Reversible (${esc(e.reversibility)})" onclick="event.stopPropagation();copyRollback('${esc(e.compensation_token)}')">⤺ rollback</button>`
         : (e.reversibility?`<span class=rev title="${esc(e.reversibility)}">${e.reversibility==='IRREVERSIBLE'?'— final':''}</span>`:'');
-      return `<div class=row>
-        <span class=t data-l=time title="${esc(e.received_at)}">${hhmmss(e.received_at)}</span>
+      return `<div class=row data-id="${e.id}" onclick="toggle(${e.id})">
+        <span class=t data-l=time title="${esc(e.received_at)}"><span class=caret>›</span> ${hhmmss(e.received_at)}</span>
         <span class=src data-l=source>${esc(e.source||'')}</span>
         <span class=ev data-l=event><span class="pill ${cls}">${esc(ev)}</span></span>
+        <span data-l=verified>${vf}</span>
         <span class=verbcell data-l=verb>${esc(e.verb||'—')}${detail?`<span class=vdetail>${detail}</span>`:''}</span>
         <span data-l=tier>${tier}</span>
         <span class=pid data-l=proposal>${esc((e.proposal||'').slice(0,10))}</span>
         <span class=ws data-l=workspace>${esc(e.workspace||'—')}</span>
         <span class=rowact data-l=action>${act}</span>
-      </div>`;
+      </div><div class=exp id="exp-${e.id}"></div>`;
     }).join('');
+    paintOpen();   // restore an open expansion across the 2s refresh (detail is cached & immutable)
   }catch(_){}
+}
+
+// ── expandable row: the full payload journey, lazy-fetched on click ─────────────────────────────
+let openId=null;const detailHtml={};
+function toggle(id){
+  if(openId===id){openId=null;paintOpen();return;}
+  openId=id;
+  if(detailHtml[id]){paintOpen();return;}
+  paintOpen('<div class=exp-load>Loading the payload journey…</div>');
+  fetch('/api/events/'+id).then(r=>r.ok?r.json():Promise.reject(r.status))
+    .then(d=>{detailHtml[id]=renderDetail(d);if(openId===id)paintOpen();})
+    .catch(()=>{if(openId===id)paintOpen('<div class=exp-load>Could not load this event\\'s detail.</div>');});
+}
+function paintOpen(loadingHtml){
+  document.querySelectorAll('.exp.open').forEach(el=>{el.classList.remove('open');el.innerHTML='';});
+  document.querySelectorAll('.row.sel').forEach(el=>el.classList.remove('sel'));
+  if(openId==null)return;
+  const exp=document.getElementById('exp-'+openId);
+  if(!exp)return;  // the row scrolled out of the 200-row window
+  exp.innerHTML=loadingHtml||detailHtml[openId]||'';
+  exp.classList.add('open');
+  const row=document.querySelector('.row[data-id="'+openId+'"]');if(row)row.classList.add('sel');
+}
+
+function fact(k,v,mut){return v==null||v===''?'':`<div class=fact><div class=k>${esc(k)}</div><div class="v${mut?' mut':''}">${esc(v)}</div></div>`;}
+function jval(v){return (v&&typeof v==='object')?JSON.stringify(v):String(v==null?'':v);}
+function renderDetail(d){
+  const out=[];
+  const vf=d.verify?`<span class="vf ${esc(d.verify)}">${VFG[d.verify]||''} ${esc(d.verify)}</span>`:'';
+  const tier=d.tier?`<span class="tier ${esc(d.tier)}">${esc(d.tier)}</span>`:'';
+  const prev=d.preview&&(d.preview.ar||d.preview.en)||'';
+  // a. intent
+  out.push(`<div class=dsec><div class=h>intent — what the agent asked</div><div class=facts>
+    ${fact('verb',d.verb)}${fact('tier',d.tier)}${fact('workspace',d.workspace)}
+    ${fact('source',d.source)}${fact('grant',d.grant_id,1)}</div>
+    ${prev?`<div class=dnote>“${esc(prev)}”</div>`:''}
+    ${Object.keys(d.raw_args||{}).length?`<div class=dnote>raw args</div><pre class=draw>${esc(JSON.stringify(d.raw_args,null,2))}</pre>`:''}</div>`);
+  // b. resolution
+  if(Object.keys(d.resolved||{}).length||d.ignored||d.expires_at){
+    out.push(`<div class=dsec><div class=h>resolution — what the system resolved it to</div><div class=facts>
+      ${fact('expires at',d.expires_at,1)}${d.ignored?fact('ignored args',jval(d.ignored)):''}</div>
+      ${Object.keys(d.resolved||{}).length?`<pre class=draw>${esc(JSON.stringify(d.resolved,null,2))}</pre>`:''}</div>`);
+  }
+  // c. field-level SSOT verdict — the heart. before → requested → after, read back from the source.
+  if((d.fields||[]).length){
+    const dropped=d.fields.filter(f=>!f.verified).length;
+    const hasBA=d.fields.some(f=>('before' in f)||('after' in f));  // adapter emitted the real read-back
+    const trs=d.fields.map(f=>{
+      const cells=hasBA
+        ? `<td class=v>${esc(jval(f.before))}</td><td>${esc(jval(f.requested))}</td><td class="${f.verified?'':'drop'}">${esc(jval(f.after))}</td>`
+        : `<td>${esc(jval(f.requested))}</td>`;
+      return `<tr class="${f.verified?'':'dropped'}">
+        <td class=fname>${esc(f.field)}</td>${cells}
+        <td class="${f.verified?'ok':'drop'}">${f.verified?'✓ landed':'✗ dropped'}</td></tr>`;
+    }).join('');
+    const head=hasBA
+      ? '<th>field</th><th>before</th><th>requested</th><th>after (SSOT)</th><th>verdict</th>'
+      : '<th>field</th><th>requested</th><th>verdict</th>';
+    out.push(`<div class=dsec><div class=h>field verification — before → requested → SSOT read-back ${vf}</div>
+      <table class=ftable><thead><tr>${head}</tr></thead><tbody>${trs}</tbody></table>
+      ${dropped?`<div class=dnote>⚠ ${dropped} field(s) did not survive the write — the row claimed success but the SSOT disagrees.${hasBA?'':' (This adapter reports only the dropped field names, not per-field read-back values.)'}</div>`:''}</div>`);
+  }
+  // d. commit & effect
+  const r=d.result||{};const e=r.entity||{};const ss=r.ssot||{};const c=r.compensation||{};
+  const replayed=(d.journey||[]).some(j=>j.replayed);
+  if(r.claim||e.id||c.reversibility){
+    out.push(`<div class=dsec><div class=h>commit &amp; effect</div><div class=facts>
+      ${fact('claim',r.claim)}${fact('changed',r.changed==null?'':String(r.changed))}
+      ${fact('entity',e.type)}${fact('entity id',e.id)}${fact('entity url',e.url)}
+      ${fact('backend',ss.system)}${fact('read-after-write',ss.read_after_write==null?'':String(ss.read_after_write))}
+      ${fact('reversibility',c.reversibility)}${fact('compensation token',c.token,1)}
+      ${replayed?fact('replayed','yes (idempotent — deduped)'):''}</div></div>`);
+  }
+  // e. refusal (security-relevant)
+  if(d.refusal&&d.refusal.code){
+    out.push(`<div class=dsec><div class=h>refusal</div><div class=facts>
+      ${fact('code',d.refusal.code)}${fact('field',d.refusal.field)}</div>
+      ${d.refusal.message?`<div class=dnote>${esc(d.refusal.message)}</div>`:''}</div>`);
+  }
+  // f. saga thread
+  if((d.journey||[]).length>1){
+    out.push(`<div class=dsec><div class=h>journey — every event on this proposal</div><div class=facts>
+      ${d.journey.map(j=>fact(hhmmss(j.received_at),j.event)).join('')}</div></div>`);
+  }
+  // g. raw — reconstruct from the log alone
+  const raw=esc(JSON.stringify(d.raw,null,2));
+  out.push(`<div class=dsec><div class=h>raw envelopes</div>
+    <button class="btn tiny ghost copybtn" onclick='event.stopPropagation();copyText(${JSON.stringify(JSON.stringify(d.raw,null,2))})'>⧉ copy raw</button>
+    <pre class=draw>${raw}</pre></div>`);
+  return out.join('');
+}
+async function copyText(t){
+  try{await navigator.clipboard.writeText(t);}catch(e){
+    const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();
+    try{document.execCommand('copy');}catch(_){}ta.remove();}
+  toast('Raw envelopes copied.');
 }
 
 async function decide(id,status){

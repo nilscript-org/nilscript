@@ -280,6 +280,108 @@ def test_recent_joins_executed_to_proposed_for_verb_tier_and_name() -> None:
     assert ex["summary"] == "Create contact «Ahmad Saleh»"  # the human one-liner with the name
 
 
+def test_recent_surfaces_partial_verification_when_a_field_dropped() -> None:
+    # The headline fix: a commit that CLAIMS success but left a field unwritten must read 'partial',
+    # derived from claim + ssot.unverified_fields — NOT the bare `verified` flag that lied when
+    # country_id silently dropped. The green-on-a-broken-write is exactly what this column catches.
+    s = _store()
+    s.ingest({
+        "nil": "0.1", "id": "v1", "performative": "EVENT", "workspace": "owner",
+        "body": {"event": "executed", "proposal": "pc", "result": {
+            "claim": "success", "changed": True, "verified": True,
+            "entity": {"type": "contact", "id": "39", "url": "/res-partner/39"},
+            "ssot": {"system": "odoo_crm", "read_after_write": True, "unverified_fields": ["country_id"]}}},
+    }, 1)
+    row = s.recent()[0]
+    assert row["verify"] == "partial"   # unverified_fields non-empty overrides the green claim
+    assert "id" in row                  # a stable handle for the detail fetch
+
+
+def test_recent_verify_is_verified_on_a_clean_readback() -> None:
+    s = _store()
+    s.ingest({"nil": "0.1", "id": "v2", "performative": "EVENT", "workspace": "owner",
+              "body": {"event": "executed", "proposal": "pd", "result": {
+                  "claim": "success", "verified": True,
+                  "ssot": {"system": "odoo_crm", "unverified_fields": []}}}}, 1)
+    assert s.recent()[0]["verify"] == "verified"
+
+
+def test_recent_verify_is_failed_on_failure_claim() -> None:
+    s = _store()
+    s.ingest({"nil": "0.1", "id": "v3", "performative": "EVENT", "workspace": "owner",
+              "body": {"event": "executed", "proposal": "pf",
+                       "result": {"claim": "failure", "verified": False, "ssot": {}}}}, 1)
+    assert s.recent()[0]["verify"] == "failed"
+
+
+def test_recent_verify_is_none_for_a_proposed_event() -> None:
+    # No write happened yet → no verification verdict to show (the column stays blank, not green).
+    s = _store()
+    s.ingest(_proposed(1, proposal="pp"), 1)
+    assert s.recent()[0]["verify"] is None
+
+
+def test_detail_assembles_the_full_payload_journey_with_field_diff() -> None:
+    # Clicking a row must reconstruct the action end-to-end from the log alone: raw intent → resolved
+    # values → field-level SSOT verdict → effect — without opening Odoo. This is the expand contract.
+    s = _store()
+    s.ingest({"nil": "0.1", "id": "pj1", "performative": "EVENT", "workspace": "owner",
+              "body": {"event": "proposed", "proposal": "pj", "verb": "crm.update_contact", "tier": "MEDIUM",
+                       "preview": {"en": "Update contact", "ar": "تحديث جهة اتصال"},
+                       "resolved": {"name": "Ahmad", "country_id": 190},
+                       "expires_at": "2026-06-22T01:00:00Z"}}, 1)
+    s.ingest({"nil": "0.1", "id": "pj2", "performative": "EVENT", "workspace": "owner",
+              "body": {"event": "executed", "proposal": "pj", "args": {"name": "Ahmad", "country": "السعودية"},
+                       "result": {"claim": "success", "verified": True,
+                                  "entity": {"type": "contact", "id": "39", "url": "/res-partner/39"},
+                                  "ssot": {"system": "odoo_crm", "read_after_write": True,
+                                           "unverified_fields": ["country_id"]},
+                                  "compensation": {"reversibility": "COMPENSABLE", "token": "tok"}}}}, 2)
+    ex = next(r for r in s.recent() if r["event"] == "executed")
+    d = s.detail(ex["id"])
+    assert d is not None
+    assert d["verb"] == "crm.update_contact" and d["tier"] == "MEDIUM"   # joined from the proposal
+    assert d["verify"] == "partial"
+    assert d["raw_args"] == {"name": "Ahmad", "country": "السعودية"}     # what the agent actually sent
+    assert d["resolved"] == {"name": "Ahmad", "country_id": 190}          # after resolution
+    by = {f["field"]: f for f in d["fields"]}
+    assert by["country_id"]["verified"] is False and by["country_id"]["requested"] == 190  # dropped
+    assert by["name"]["verified"] is True                                # confirmed in SSOT
+    assert d["result"]["compensation"]["token"] == "tok"
+    assert [j["event"] for j in d["journey"]] == ["proposed", "executed"]  # ordered saga
+
+
+def test_detail_uses_adapter_emitted_before_after_diff_when_present() -> None:
+    # When the adapter emits result.ssot.fields (real before→after read-back), the detail must
+    # surface those true values — not re-derive a thinner diff from the proposal's resolved args.
+    s = _store()
+    s.ingest({"nil": "0.1", "id": "fd1", "performative": "EVENT", "workspace": "owner",
+              "body": {"event": "executed", "proposal": "pq", "result": {
+                  "claim": "partial", "verified": False,
+                  "ssot": {"system": "odoo_crm", "read_after_write": True,
+                           "unverified_fields": ["country_id"],
+                           "fields": [
+                               {"field": "name", "before": "Ahmad", "requested": "Ahmad Saleh",
+                                "after": "Ahmad Saleh", "verified": True},
+                               {"field": "country_id", "before": False, "requested": 190,
+                                "after": False, "verified": False}]}}}}, 1)
+    d = s.detail(s.recent()[0]["id"])
+    by = {f["field"]: f for f in d["fields"]}
+    assert by["country_id"]["before"] is False and by["country_id"]["after"] is False
+    assert by["country_id"]["requested"] == 190 and by["country_id"]["verified"] is False
+    assert by["name"]["before"] == "Ahmad" and by["name"]["after"] == "Ahmad Saleh"
+
+
+def test_detail_endpoint_returns_journey_and_404s_unknown() -> None:
+    s = _store()
+    s.ingest(_event(1, ev="executed", proposal="pp"), 1)
+    client = TestClient(create_app(s, secret=""))
+    ex = client.get("/api/events").json()["events"][0]
+    d = client.get(f"/api/events/{ex['id']}").json()
+    assert d["id"] == ex["id"]
+    assert client.get("/api/events/999999").status_code == 404
+
+
 def test_registry_view_is_public_and_redacted(monkeypatch) -> None:
     monkeypatch.setenv("NIL_WORKSPACE", "owner")
     s = _store()

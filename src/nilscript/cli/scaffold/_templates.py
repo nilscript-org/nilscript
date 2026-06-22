@@ -62,11 +62,24 @@ def _field_landed(actual: Any, intended: Any) -> bool:
     return intended_s == actual_s or intended_s in actual_s
 
 
-def _verify_write(client: SystemClient, target: str, record_id: str, native: dict[str, Any]) -> list[str]:
-    """Read the record back from the SSOT; return the written fields that did NOT land. Empty list =>
-    every intended field is present — the ONLY condition under which verified may be true."""
+def _verify_and_diff(
+    client: SystemClient, target: str, record_id: str,
+    before: dict[str, Any], native: dict[str, Any],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """One SSOT read-back => (unverified_fields, per-field before->after diff). The diff carries, for
+    every written field, what it WAS, what was ASKED, and what actually LANDED — so the control plane
+    shows a silent drop field-by-field, not just a name in a list. `unverified` (a field that did not
+    land) still drives the verified/partial verdict, unchanged. Empty unverified => verified may be true."""
     after = client.get(target, record_id) or {{}}
-    return [field for field, value in native.items() if not _field_landed(after.get(field), value)]
+    unverified: list[str] = []
+    diff: list[dict[str, Any]] = []
+    for field, value in native.items():
+        landed = _field_landed(after.get(field), value)
+        if not landed:
+            unverified.append(field)
+        diff.append({{"field": field, "before": before.get(field), "requested": value,
+                     "after": after.get(field), "verified": landed}})
+    return unverified, diff
 
 
 def _resource_phrase(op: str, target: str, args: dict[str, Any]) -> tuple[str, str]:
@@ -267,14 +280,17 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             state.compensations[tok] = {{"resource": True, "rev_verb": rev_verb, "rev_args": rev_args}}
             comp_block["token"] = tok
             # EARN verified: create/update re-read and compare `data`; delete confirms absence.
+            field_diff: list[dict[str, Any]] = []
             if op == "delete":
                 unverified, verified = [], client.get(target, rid) is None
             else:
-                unverified = _verify_write(client, target, rid, data)
+                unverified, field_diff = _verify_and_diff(client, target, rid, before, data)
                 verified = not unverified
             ssot = {{"system": SYSTEM, "read_after_write": True}}
             if unverified:
                 ssot["unverified_fields"] = unverified
+            if field_diff:
+                ssot["fields"] = field_diff
             result = {{"claim": "success" if verified else "partial", "changed": True, "verified": verified,
                       "entity": {{"type": stored["verb"], "id": rid, "url": f"/{{target}}/{{rid}}"}},
                       "ssot": ssot, "compensation": comp_block}}
@@ -288,6 +304,7 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
                          "proposal": proposal_id, "result": result}}), state.next_sequence(env.get("workspace", "")))
             return _envelope("STATUS", env, status_body)
         verb = WRITE_VERBS[stored["verb"]]
+        before_image: dict[str, Any] = {{}}  # pre-write SSOT snapshot -> the diff's 'before' column
         try:
             # to_native is inside the try so an UNFILLED stub (NotImplementedError) is a clean
             # terminal failure, not a 500 — the conformance proof reads it as non-conformance.
@@ -304,6 +321,7 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             elif action.startswith("update_"):
                 raw = str(stored["args"].get(verb.required[0], "")) if verb.required else ""
                 record_id = _resolve_id(client, verb.doctype, raw) or raw
+                before_image = client.get(verb.doctype, record_id) or {{}}  # for the before->after diff
                 created = client.update(verb.doctype, record_id, native)
             else:
                 created = client.create(verb.doctype, native)  # the real write
@@ -315,16 +333,19 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         # EARN verified — re-read the SSOT and confirm the written fields landed; never assert it.
         fields_written = {{}} if action.startswith("delete_") else native
         effect_id = str(created.get("id") or created.get("name") or "")
+        field_diff: list[dict[str, Any]] = []
         if action.startswith("delete_"):
             unverified, verified = [], client.get(verb.doctype, effect_id) is None
         elif fields_written and effect_id:
-            unverified = _verify_write(client, verb.doctype, effect_id, fields_written)
+            unverified, field_diff = _verify_and_diff(client, verb.doctype, effect_id, before_image, fields_written)
             verified = not unverified
         else:
             unverified, verified = [], True
         ssot: dict[str, Any] = {{"system": SYSTEM, "read_after_write": True}}
         if unverified:
             ssot["unverified_fields"] = unverified
+        if field_diff:
+            ssot["fields"] = field_diff
         result = {{
             "claim": "success" if verified else "partial",
             "changed": True,

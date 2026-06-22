@@ -69,6 +69,38 @@ def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 
+def _loads(envelope: str | None) -> dict[str, Any]:
+    """Best-effort parse of a stored envelope; a corrupt row must never crash the timeline."""
+    if not envelope:
+        return {}
+    try:
+        out = json.loads(envelope)
+        return out if isinstance(out, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def _verify_status(event: str | None, result: dict[str, Any]) -> str | None:
+    """Field-level truth for the VERIFIED column — derived from `claim` + `ssot.unverified_fields`,
+    NOT the bare `result.verified` flag (which reported success while country_id silently dropped).
+    `verified` = the SSOT read-back matched the intent; `partial` = something didn't persist;
+    `failed` = the write itself failed. None when the event carries no write result (e.g. proposed)."""
+    if not result:
+        return None
+    claim = str(result.get("claim") or "").lower()
+    unverified = (result.get("ssot") or {}).get("unverified_fields") or []
+    if claim == "failure":
+        return "failed"
+    if unverified or claim == "partial":
+        return "partial"
+    if claim == "success":
+        return "verified"
+    # An executed write with a result but no explicit claim: the verified flag is a weak last resort.
+    if event in ("executed", "rolled_back"):
+        return "verified" if result.get("verified") else "partial"
+    return None
+
+
 class EventStore:
     """Thread-safe SQLite event log. `ingest` dedups by (workspace, sequence); `recent` reads newest-first."""
 
@@ -123,7 +155,7 @@ class EventStore:
     def recent(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT received_at, workspace, sequence, grant_id, source, performative, "
+                "SELECT id, received_at, workspace, sequence, grant_id, source, performative, "
                 "event, proposal, verb, tier, severity, envelope FROM events ORDER BY id DESC LIMIT ?",
                 (max(1, min(limit, 1000)),),
             ).fetchall()
@@ -188,8 +220,85 @@ class EventStore:
                 summary = f"{entity.get('url') or entity.get('type') or ''}".strip("/") or (str(eid) if eid else None)
             record["summary"] = summary
             record["args"] = body.get("args") or None
+            # The headline column: did the intent actually land in the SSOT, field for field?
+            record["verify"] = _verify_status(record.get("event"), result)
             out.append(record)
         return out
+
+    def detail(self, event_id: int) -> dict[str, Any] | None:
+        """The full payload journey for one event — raw intent → resolved values → field-level SSOT
+        verdict → effect — assembled from its own envelope plus its proposal's `proposed` event and
+        every sibling event for that proposal. Everything needed to reconstruct a (failed) action
+        from the log alone, without opening the backend or the logs. Returns None for an unknown id."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, received_at, workspace, grant_id, source, performative, event, proposal, "
+                "verb, tier, severity, envelope FROM events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        env = _loads(row["envelope"])
+        body = env.get("body") or {}
+        result = body.get("result") or {}
+        proposal_id = row["proposal"]
+        # The proposal carries the intent the executed event omits: raw args, resolved values,
+        # preview, expiry, and which args were ignored. Walk every event on this proposal to show
+        # the saga (proposed → executed/refused → rolled_back) as one ordered thread.
+        proposed_body: dict[str, Any] = {}
+        journey: list[dict[str, Any]] = []
+        if proposal_id:
+            with self._lock:
+                prows = self._conn.execute(
+                    "SELECT id, received_at, event, envelope FROM events WHERE proposal = ? ORDER BY id",
+                    (proposal_id,),
+                ).fetchall()
+            for pr in prows:
+                pbody = _loads(pr["envelope"]).get("body") or {}
+                if pr["event"] == "proposed" and not proposed_body:
+                    proposed_body = pbody
+                journey.append({
+                    "id": pr["id"], "event": pr["event"], "received_at": pr["received_at"],
+                    "replayed": pbody.get("replayed"),
+                })
+        resolved = proposed_body.get("resolved") or {}
+        ssot = result.get("ssot") or {}
+        # Field-level diff: prefer the adapter's emitted before→after read-back (the real prior value,
+        # the requested value, and what actually LANDED in the SSOT). `verified=False` is exactly the
+        # silent drop (country_id) the green row used to hide. Older adapters emit only the dropped
+        # field names — fall back to the proposal's resolved values (no before/after available).
+        emitted = ssot.get("fields")
+        if emitted:
+            fields = [
+                {"field": f.get("field"), "before": f.get("before"), "requested": f.get("requested"),
+                 "after": f.get("after"), "verified": bool(f.get("verified"))}
+                for f in emitted
+            ]
+        else:
+            unverified = set(ssot.get("unverified_fields") or [])
+            fields = [
+                {"field": k, "requested": v, "verified": k not in unverified}
+                for k, v in resolved.items()
+            ]
+        code = body.get("code")
+        return {
+            "id": row["id"], "received_at": row["received_at"], "workspace": row["workspace"],
+            "grant_id": row["grant_id"], "source": row["source"], "event": row["event"],
+            "verb": row["verb"] or proposed_body.get("verb"),
+            "tier": row["tier"] or proposed_body.get("tier"),
+            "verify": _verify_status(row["event"], result),
+            "preview": proposed_body.get("preview") or body.get("preview") or None,
+            "raw_args": body.get("args") or proposed_body.get("args") or {},
+            "resolved": resolved,
+            "ignored": proposed_body.get("ignored") or None,
+            "expires_at": proposed_body.get("expires_at"),
+            "refusal": {"code": code, "message": body.get("message"), "field": body.get("field")}
+            if code else None,
+            "result": result or None,
+            "fields": fields,
+            "journey": journey,
+            "raw": {"event": env, "proposed": proposed_body or None},
+        }
 
     def count(self) -> int:
         with self._lock:
