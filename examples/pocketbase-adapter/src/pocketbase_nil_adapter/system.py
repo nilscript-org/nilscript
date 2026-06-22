@@ -23,6 +23,8 @@ class SystemClient(Protocol):
 
     def delete(self, target: str, record_id: str) -> None: ...
 
+    def get(self, target: str, record_id: str) -> dict[str, Any] | None: ...  # read-back for verify
+
 
 class PocketBaseClient:
     """PocketBase backend: every NIL entity is a collection of records.
@@ -88,6 +90,14 @@ class PocketBaseClient:
         if resp.status_code >= 400:
             raise SystemError(f"{target}/{record_id}: {resp.text}")
 
+    def get(self, target: str, record_id: str) -> dict[str, Any] | None:
+        resp = self._http.get(f"/api/collections/{target}/records/{record_id}")
+        if resp.status_code >= 400:
+            return None
+        record = resp.json()
+        record.setdefault("name", record.get("id"))
+        return record
+
 
 # Backwards-friendly alias: the scaffold refers to a generic "RealSystemClient".
 RealSystemClient = PocketBaseClient
@@ -125,3 +135,6 @@ class FakeSystem:
     def delete(self, target: str, record_id: str) -> None:
         rows = self.docs.get(target, [])
         self.docs[target] = [r for r in rows if r.get("name") != record_id]
+
+    def get(self, target: str, record_id: str) -> dict[str, Any] | None:
+        return next((r for r in self.docs.get(target, []) if r.get("name") == record_id), None)
