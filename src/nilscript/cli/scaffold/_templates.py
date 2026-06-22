@@ -235,11 +235,49 @@ def _envelope(performative: str, env: dict[str, Any], body: dict[str, Any]) -> d
     }}
 
 
-def _refusal(env: dict[str, Any], code: str, message: str, field: str | None = None) -> dict[str, Any]:
+def _refusal(env: dict[str, Any], code: str, message: str, field: str | None = None,
+             candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     body: dict[str, Any] = {{"outcome": "refusal", "code": code, "message": message}}
     if field is not None:
         body["field"] = field
+    if candidates:  # Choice Gate: the live option set the agent must pick from
+        body["candidates"] = candidates
     return _envelope("PROPOSAL", env, body)
+
+
+def _choice_gate(client: SystemClient, doctype: str, native: dict[str, Any],
+                 env: dict[str, Any]) -> dict[str, Any] | None:
+    """Choice Gate (PROPOSE-time). Every constrained field's value must resolve to a real member of
+    its live set; if one can't, refuse WITH the candidate options so the agent picks the right member
+    in any language and re-proposes — never a hallucinated or silently-wrong value. None = all valid."""
+    meta_by_field = {{f.get("name"): f for f in (client.schema(doctype) or [])}}
+    for field, value in native.items():
+        if value in (None, ""):
+            continue
+        meta = meta_by_field.get(field) or {{}}
+        for v in (value if isinstance(value, (list, tuple)) else [value]):
+            if meta.get("relation"):
+                model = meta["relation"]
+                try:
+                    _resolve_reference(client, model, v)
+                except SystemError as exc:
+                    code = "AMBIGUOUS" if "AMBIGUOUS" in str(exc) else "INVALID_ARGS"
+                    rows = client.search(model, [["name", "ilike", str(v)[:3]]],
+                                         fields=("id", "name", "code"), limit=30) \
+                        or client.search(model, [], fields=("id", "name", "code"), limit=30)
+                    cands = [{{"id": r.get("id"), "name": r.get("name"), "code": r.get("code")}} for r in rows]
+                    msg = (f"{{field}}: '{{v}}' did not resolve to a {{model}}. Pick one of the listed options "
+                           f"(or query resource.read target={{model}} for the full set), then re-propose.")
+                    return _refusal(env, code, msg, field=field, candidates=cands)
+            elif meta.get("options"):
+                try:
+                    _resolve_option(meta["options"], v)
+                except SystemError as exc:
+                    code = "AMBIGUOUS" if "AMBIGUOUS" in str(exc) else "INVALID_ARGS"
+                    cands = [{{"value": o.get("value"), "label": o.get("label")}} for o in meta["options"]]
+                    return _refusal(env, code, f"{{field}}: '{{v}}' is not an allowed value — choose one of "
+                                    f"the listed options, then re-propose.", field=field, candidates=cands)
+    return None
 
 
 def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | None) -> FastAPI:
@@ -275,6 +313,10 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             if not client.exists(target):
                 return _refusal(env, "UPSTREAM_UNAVAILABLE",
                                 f"backend target '{{target}}' is not provisioned on this system")
+            if op in ("create", "update"):  # Choice Gate: constrained values must be real members
+                gate = _choice_gate(client, target, args.get("data") or {{}}, env)
+                if gate is not None:
+                    return gate
             pid = uuid4().hex[:16]
             state.proposals[pid] = {{"verb": verb_name, "args": args, "resource": True}}
             en, ar = _resource_phrase(op, target, args)
@@ -293,6 +335,11 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         if not client.exists(verb.doctype):
             return _refusal(env, "UPSTREAM_UNAVAILABLE",
                             f"backend target '{{verb.doctype}}' is not provisioned on this system")
+        # Choice Gate: every constrained field's value must resolve to a real member; refuse with the
+        # candidate options if not, so the agent picks the right one and re-proposes.
+        gate = _choice_gate(client, verb.doctype, dict(verb.to_native(args)), env)
+        if gate is not None:
+            return gate
         proposal_id = uuid4().hex[:16]
         state.proposals[proposal_id] = {{"verb": verb_name, "args": args}}  # NO write — dry-run only
         return _envelope(
