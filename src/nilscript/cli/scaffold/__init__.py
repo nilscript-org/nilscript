@@ -103,6 +103,41 @@ def test_describe_exposes_skeleton() -> None:
     for name, t in targets.items():
         assert isinstance(t, dict) and "exists" in t and "fields" in t, f"{{name}}: target needs exists+fields"
     assert all(t["exists"] for t in targets.values()), "FakeSystem targets are always provisioned"
+
+
+def test_verified_is_earned_not_asserted() -> None:
+    """ADMISSION GATE — an edge must EARN `verified`: never report verified:true for a field the backend
+    silently dropped. resource.update through a backend that drops the field must yield verified:false."""
+    class _DropsField(FakeSystem):
+        def update(self, target, record_id, doc):
+            return super().update(target, record_id, {{k: v for k, v in doc.items() if k != "earned_probe"}})
+    sys = _DropsField()
+    client = TestClient(create_app(sys, CapturingEmitter(), bearer=None), raise_server_exceptions=False)
+    targets = list(client.get("/nil/v0.1/describe").json().get("targets", {{}}))
+    if not targets:
+        pytest.skip("adapter declares no targets")
+    t = targets[0]
+    sys.create(t, {{"name": "rec1"}})
+    pid = client.post("/nil/v0.1/propose", json=_env("resource.update",
+        {{"target": t, "id": "rec1", "data": {{"earned_probe": "x"}}}})).json()["body"]["id"]
+    st = client.post("/nil/v0.1/commit", json={{"nil": "0.1", "grant": "g", "workspace": "w",
+        "body": {{"proposal": pid, "idempotency_key": pid}}}}).json()["body"]
+    assert st["result"]["verified"] is False, "verified must be EARNED — a dropped field cannot be verified"
+    assert "earned_probe" in st["result"].get("unverified_fields", []), "the unverified field must be named"
+
+
+def test_resource_star_is_skeleton_bounded() -> None:
+    """ADMISSION GATE — advertised ≡ committable: resource.* against an undeclared target is refused with
+    zero effect, even though the backend would provision it (β⁻¹(a)=∅ for the generic CRUD family)."""
+    sys = FakeSystem()
+    client = TestClient(create_app(sys, CapturingEmitter(), bearer=None), raise_server_exceptions=False)
+    advertised = set(client.get("/nil/v0.1/describe").json().get("targets", {{}}))
+    undeclared = "__undeclared_probe__"
+    assert undeclared not in advertised
+    body = client.post("/nil/v0.1/propose", json=_env("resource.create",
+        {{"target": undeclared, "data": {{"x": 1}}}})).json()["body"]
+    assert body["outcome"] == "refusal", f"resource.* on an undeclared target must be refused, got {{body}}"
+    assert sys.docs.get(undeclared) is None, "EL must be 0 — no record on an undeclared target"
 '''
 
 

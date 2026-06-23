@@ -274,3 +274,26 @@ The §3 HVR axis is what converts the structural claim from asserted to measured
 All conformance suites green; full-tree sweeps clean of the hardcoded `verified` and of the
 unbounded `resource.*`. The published artifact (repo + Zenodo + arXiv source) must reflect these
 commits so **code == claim** holds for the "earned, not asserted" and "skeleton-bounded" guarantees.
+
+## 8. Strong closure — the two findings are now KERNEL-ENFORCED admission gates
+
+Both invariants moved from per-adapter tests to **kernel conformance gates** (axis 3), so a
+non-conformant adapter **fails admission** rather than relying on each adapter to police itself:
+
+- **`bench/conformance/test_admission_gates.py`** — a general, deterministic gate (no Hypothesis dep):
+  point `PYTHONPATH=<adapter>/src` at *any* adapter and it asserts both invariants. Both gates are
+  real (they encode the exact two regressions and are RED before the fixes):
+  - *earned, not asserted* — drives `resource.update` through a backend that silently drops the
+    written field; a conformant edge re-reads the SSOT and reports `verified:false` + names the field.
+    An edge that hardcodes `verified:true` fails.
+  - *advertised ≡ committable* — proposes `resource.create` on a target outside `describe()`'s
+    advertised set (FakeSystem provisions everything); a conformant edge refuses with zero effect.
+    An edge bounded only by `client.exists` fails.
+- **Scaffold template** — every generated adapter now embeds both gates in its own `conformance/`
+  suite (verified: a fresh scaffold passes both). New adapters self-enforce from line one.
+
+This converts §4.3's promise ("a tested property of the contract, not an assertion") and §4.1's
+Guarantee 2 from prose into an **enforced admission check** — the per-adapter → kernel-level closure
+flagged as open in the prior assessment. (Still open, honestly: the *running MCP* trusts the adapter
+envelope rather than re-verifying it at the kernel; and `bench/core/gate.py` — the InjecAgent gate — is
+unchanged, its integrity items documented in §4, not fixed.)
