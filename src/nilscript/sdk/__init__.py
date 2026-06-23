@@ -9,6 +9,7 @@ from nilscript.sdk.bootstrap import client_for_grant, client_from_env
 from nilscript.sdk.client import NilClient
 from nilscript.sdk.connect import handshake
 from nilscript.sdk.grants import GrantRef, scope_allows
+from nilscript.sdk.legibility import echo_preview, field_label, legible
 from nilscript.sdk.refusals import RefusalCode
 from nilscript.sdk.transport import NilTransport
 
@@ -25,4 +26,7 @@ __all__ = [
     "client_from_env",
     "client_for_grant",
     "handshake",
+    "legible",
+    "field_label",
+    "echo_preview",
 ]
