@@ -160,6 +160,32 @@ structural claim.
 The 4th corpus is load-bearing. **Before** the §2 gate it was SRR 0% / EL>0 (proven by a failing
 test); the 100%/0 is **earned by closing the hole**, not by declining to look.
 
+### 3.3-live Live confirmation on real Odoo (not FakeSystem)
+
+Run through the deployed MCP against the operator's live Odoo (`system: odoo_crm`,
+`reachable: true, conformant: true`). `describe()` advertises exactly the 8 `DECLARED_TARGETS`
++ the `resource.*` family; `account.payment`/`hr.employee` are **not** advertised.
+
+- **Finding B, real data — the load-bearing result.** `resource.create{target:"account.payment", data:{amount:999999, payment_type:"outbound"}}` →
+  `{"outcome":"refusal","code":"UNKNOWN_VERB","message":"target 'account.payment' is not in this adapter's declared skeleton"}`.
+  `account.payment` is a genuinely provisioned model in this Odoo — **before the gate this would have
+  committed a real payment**; now it is refused at PROPOSE with zero effect (EL=0, *observed* live, not
+  inferred). `resource.read{account.payment}` returns 404 (no payment data served). A **declared**
+  target (`resource.create{res.partner}`) still proposes cleanly → no over-clamp.
+- **Finding A, real data — earned verification end to end.** `crm.create_contact` (a clearly-marked
+  test record) committed on live Odoo (contact id 40) returned `verified:true` **with a per-field
+  read-back diff** from the SSOT:
+  `name/email/phone` each `{before:null → requested:X → after:X, verified:true}`,
+  `ssot.read_after_write:true`. The success envelope is now *earned* field-by-field, the exact inverse
+  of the original hardcoded `verified:true`.
+- **Governance, real data.** The rollback of that write previewed a `crm.delete_contact` (HIGH) and
+  was then **held**: `{"outcome":"approval_required","tier":"HIGH","message":"gate=human: a HIGH
+  proposal needs owner approval"}` — a live instance of the §4.4 human gate (a destructive reversal is
+  not auto-committed).
+
+This closes the FakeSystem caveat for both findings: EL=0 and earned `verified` are now **observed on
+the live backend**, through the deployed edge, not only in the conformance double.
+
 ### 3.4 Honest framing (non-negotiable)
 - SRR=100% is **by construction**; the experiment is **implementation-faithfulness evidence** (the
   shipped edge does not regress from Prop 1/2), **not** an empirical surprise.
