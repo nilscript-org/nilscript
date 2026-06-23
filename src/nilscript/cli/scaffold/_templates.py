@@ -331,6 +331,12 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             target = args.get("target")
             if not target:
                 return _refusal(env, "INVALID_ARGS", "missing required arg: target", field="target")
+            # Skeleton bound (advertised ≡ committable): resource.* may only touch a DECLARED target —
+            # by default the doctypes the curated verbs write, so a provisioned-but-undeclared model is
+            # unexpressible (Guarantee 2 holds literally). Widen via an explicit allowlist if a flow needs it.
+            if target not in {{v.doctype for v in WRITE_VERBS.values()}}:
+                return _refusal(env, "UNKNOWN_VERB",
+                                f"target '{{target}}' is not in this adapter's declared skeleton")
             if op in ("update", "delete") and not args.get("id"):
                 return _refusal(env, "INVALID_ARGS", "missing required arg: id", field="id")
             if op in ("create", "update") and not isinstance(args.get("data"), dict):
@@ -361,8 +367,14 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             return _refusal(env, "UPSTREAM_UNAVAILABLE",
                             f"backend target '{{verb.doctype}}' is not provisioned on this system")
         # Choice Gate: every constrained field's value must resolve to a real member; refuse with the
-        # candidate options if not, so the agent picks the right one and re-proposes.
-        gate = _choice_gate(client, verb.doctype, dict(verb.to_native(args)), env)
+        # candidate options if not, so the agent picks the right one and re-proposes. to_native is a
+        # best-effort here — an UNFILLED stub (NotImplementedError) skips the gate so PROPOSE stays a
+        # clean dry-run; the real non-conformance surfaces at COMMIT, never as a 500 at PROPOSE.
+        try:
+            _gate_native = dict(verb.to_native(args))
+        except NotImplementedError:
+            _gate_native = {{}}
+        gate = _choice_gate(client, verb.doctype, _gate_native, env) if _gate_native else None
         if gate is not None:
             return gate
         proposal_id = uuid4().hex[:16]
@@ -530,8 +542,9 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         if body.get("verb") == "resource.read":
             qargs = body.get("args", {{}}) or {{}}
             target = qargs.get("target")
-            if not target or not client.exists(target):
-                raise HTTPException(status_code=404, detail=f"unknown or unprovisioned target: {{target}}")
+            # Reads obey the same skeleton bound — resource.read must not pull an undeclared model.
+            if not target or target not in {{v.doctype for v in WRITE_VERBS.values()}} or not client.exists(target):
+                raise HTTPException(status_code=404, detail=f"unknown or undeclared target: {{target}}")
             rows = client.list(target, qargs.get("match") or None)
             return {{"data": {{"target": target, "count": len(rows), "items": rows}}}}
         verb = QUERY_VERBS.get(body.get("verb"))
@@ -616,7 +629,8 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         return {{
             "nil": NIL,
             "system": SYSTEM,
-            "verbs": sorted(WRITE_VERBS) + sorted(QUERY_VERBS),
+            "verbs": ["resource.create", "resource.read", "resource.update", "resource.delete"]
+                     + sorted(WRITE_VERBS) + sorted(QUERY_VERBS),
             "targets": targets,
         }}
 

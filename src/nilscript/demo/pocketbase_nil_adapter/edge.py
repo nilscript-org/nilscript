@@ -168,6 +168,12 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
             target = args.get("target")
             if not target:
                 return _refusal(env, "INVALID_ARGS", "missing required arg: target", field="target")
+            # Skeleton bound (advertised ≡ committable): resource.* may only touch a DECLARED target
+            # (by default the doctypes the curated verbs write) — a provisioned-but-undeclared model is
+            # unexpressible (Guarantee 2 holds literally), never committed.
+            if target not in {v.doctype for v in WRITE_VERBS.values()}:
+                return _refusal(env, "UNKNOWN_VERB",
+                                f"target '{target}' is not in this adapter's declared skeleton")
             if op in ("update", "delete") and not args.get("id"):
                 return _refusal(env, "INVALID_ARGS", "missing required arg: id", field="id")
             if op in ("create", "update") and not isinstance(args.get("data"), dict):
@@ -352,8 +358,8 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         if verb_name == "resource.read":
             qargs = body.get("args", {}) or {}
             target = qargs.get("target")
-            if not target or not client.exists(target):
-                raise HTTPException(status_code=404, detail=f"unknown or unprovisioned target: {target}")
+            if not target or target not in {v.doctype for v in WRITE_VERBS.values()} or not client.exists(target):
+                raise HTTPException(status_code=404, detail=f"unknown or undeclared target: {target}")
             rows = client.list(target, qargs.get("match") or None)
             return {"data": {"target": target, "count": len(rows), "items": rows}}
         verb = QUERY_VERBS.get(verb_name)
@@ -439,7 +445,8 @@ def create_app(client: SystemClient, emitter: EventEmitter, *, bearer: str | Non
         return {
             "nil": NIL,
             "system": SYSTEM,
-            "verbs": sorted(WRITE_VERBS) + sorted(QUERY_VERBS),
+            "verbs": ["resource.create", "resource.read", "resource.update", "resource.delete"]
+                     + sorted(WRITE_VERBS) + sorted(QUERY_VERBS),
             "targets": targets,
         }
 
