@@ -1192,7 +1192,8 @@ async function loadAutomations(){
   const r=await fetch('/api/automations');const {automations}=await r.json();
   const wrap=document.getElementById('autoWrap'),box=document.getElementById('automations');
   document.getElementById('autocount').textContent=automations.length;
-  wrap.style.display=automations.length?'block':'none';
+  wrap.style.display='block';  // always visible — the compose form + token live here, even with 0 automations
+  if(!automations.length){box.innerHTML='<div class=empty style=padding:22px><div class=big>No automations yet</div><div>Click “＋ New cross-system automation” above to build one between two systems — or ask the agent via MCP.</div></div>';return;}
   box.innerHTML=automations.map(a=>{
    const nm=(a.name&&(a.name.en||a.name.ar))||a.automation_id;
    const ps=a.plan_summary||{};
