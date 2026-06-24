@@ -509,11 +509,26 @@ class EventStore:
             self._conn.commit()
         return True
 
+    def set_adapter_active(self, workspace: str, adapter_id: str, enabled: bool) -> bool:
+        """Enable/disable ONE adapter without touching its siblings (non-exclusive). This is what lets
+        a workspace have several adapters active at once — e.g. PocketBase + Odoo for a cross-system
+        automation. Returns False if no such adapter is registered."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE adapters SET active = ?, updated_at = ? WHERE workspace = ? AND adapter_id = ?",
+                (1 if enabled else 0, _now(), workspace, adapter_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
     def active_adapter(self, workspace: str) -> dict[str, Any] | None:
-        """The workspace's active adapter (WITH bearer — the MCP needs it), or None."""
+        """The workspace's default active adapter for single-backend MCP routing (WITH bearer), or
+        None. With several active, the most-recently-updated wins — composition addresses adapters by
+        id, so multi-active never makes a plain propose/commit ambiguous."""
         with self._lock:
             row = self._conn.execute(
-                f"SELECT {_ADAPTER_COLS} FROM adapters WHERE workspace = ? AND active = 1 LIMIT 1",
+                f"SELECT {_ADAPTER_COLS} FROM adapters WHERE workspace = ? AND active = 1 "
+                "ORDER BY updated_at DESC LIMIT 1",
                 (workspace,),
             ).fetchone()
         return dict(row) if row is not None else None

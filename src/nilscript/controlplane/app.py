@@ -320,6 +320,25 @@ def create_app(
             return JSONResponse({"error": "no such adapter"}, status_code=404)
         return {"ok": True, "workspace": workspace, "adapter_id": adapter_id}
 
+    @app.post("/adapters/{workspace}/{adapter_id}/enable")
+    def enable_adapter(workspace: str, adapter_id: str, authorization: str | None = Header(default=None)) -> Any:
+        """Enable an adapter WITHOUT deactivating siblings — several can be active at once (e.g.
+        PocketBase + Odoo for a cross-system automation). Operator-gated."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if not store.set_adapter_active(workspace, adapter_id, True):
+            return JSONResponse({"error": "no such adapter"}, status_code=404)
+        return {"ok": True, "workspace": workspace, "adapter_id": adapter_id, "active": True}
+
+    @app.post("/adapters/{workspace}/{adapter_id}/disable")
+    def disable_adapter(workspace: str, adapter_id: str, authorization: str | None = Header(default=None)) -> Any:
+        """Disable one adapter (leaves siblings untouched). Operator-gated."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if not store.set_adapter_active(workspace, adapter_id, False):
+            return JSONResponse({"error": "no such adapter"}, status_code=404)
+        return {"ok": True, "workspace": workspace, "adapter_id": adapter_id, "active": False}
+
     @app.get("/adapters")
     def list_adapters(workspace: str = "") -> dict[str, Any]:
         """List a workspace's registered adapters for the UI — bearer REDACTED (public read)."""
@@ -1076,21 +1095,32 @@ async function loadAdapters(){
 function host(u){try{return new URL(u).host;}catch(e){return u||'';}}
 async function loadRouting(){
  try{
-  const r=await fetch('/api/registry');const {adapters}=await r.json();
+  const r=await fetch('/api/registry');const data=await r.json();const adapters=data.adapters||[];const ws=data.workspace||'';
   const wrap=document.getElementById('routingWrap'),box=document.getElementById('routing');
   document.getElementById('rcount').textContent=adapters.length;
   wrap.style.display=adapters.length?'block':'none';
   box.innerHTML=adapters.map(a=>{
    const on=!!a.active;
+   const tgl=on
+     ? abtn('⏻ Disable','ghost',`adapterToggle('${esc(ws)}','${esc(a.adapter_id)}',false)`)
+     : abtn('⏼ Enable','ok',`adapterToggle('${esc(ws)}','${esc(a.adapter_id)}',true)`);
    return `<div class="rrow ${on?'on':''}">
      <span class=nm>${esc(a.label||a.adapter_id)}</span>
      <span class=sys>${esc(a.system||a.adapter_id)}</span>
      <span class=host>${esc(host(a.url))}</span>
      <span class=grow></span>
      <span class="rbadge ${on?'on':''}">${on?'● active':'idle'}</span>
+     ${tgl}
    </div>`;
   }).join('');
  }catch(_){}
+}
+async function adapterToggle(ws,id,enable){
+  if(!tokenVal())return toast('Enter the <b>operator token</b> (Automations section) to toggle adapters.');
+  try{const r=await fetch(`/adapters/${ws}/${id}/${enable?'enable':'disable'}`,{method:'POST',headers:authHeaders()});
+    if(r.status===401)return toast('Operator token rejected.');
+    toast(enable?'Adapter <b>enabled</b> — several can be active at once.':'Adapter disabled.');loadRouting();
+  }catch(_){toast('Could not toggle the adapter.');}
 }
 function applyThemeGlyph(){var b=document.getElementById('themeBtn');if(b)b.textContent=document.documentElement.getAttribute('data-theme')==='light'?'☀':'☾';}
 function toggleTheme(){var next=document.documentElement.getAttribute('data-theme')==='light'?'dark':'light';document.documentElement.setAttribute('data-theme',next);try{localStorage.setItem('cp-theme',next);}catch(e){}applyThemeGlyph();}

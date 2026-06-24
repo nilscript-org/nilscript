@@ -179,6 +179,11 @@ def _register_automation_tools(server: Any, auto: Any) -> None:
     ) -> dict[str, Any]:
         return await auto.register(automation_id, name, plan, trigger)
 
+    async def nil_automation_compose_register(
+        automation_id: str, name: dict[str, Any], composed: dict[str, Any], trigger: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await auto.compose_register(automation_id, name, composed, trigger)
+
     async def nil_automation_approve(workspace: str, automation_id: str, version: int) -> dict[str, Any]:
         return await auto.approve(workspace, automation_id, version)
 
@@ -198,6 +203,13 @@ def _register_automation_tools(server: Any, auto: Any) -> None:
         nil_automation_register, name="nil_automation_register",
         description="Register a validated automation into the registry as pending_approval (NOT armed). "
         "An owner approves it before it can run. Re-registering an identical plan is idempotent.",
+    )
+    server.add_tool(
+        nil_automation_compose_register, name="nil_automation_compose_register",
+        description="Register a CROSS-SYSTEM automation: `composed` = {workspace, stages:[{name, "
+        "adapter, plan, input_from}]}, each stage validated against ITS adapter's live skeleton. "
+        "Handoffs between stages are explicit ($.stage_1.step_2.output.id → next stage's $.input.*). "
+        "Lands pending_approval. Use to wire two backends (e.g. PocketBase → Odoo) into one workflow.",
     )
     server.add_tool(
         nil_automation_approve, name="nil_automation_approve",

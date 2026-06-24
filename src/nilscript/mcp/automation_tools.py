@@ -69,6 +69,22 @@ class AutomationTools:
             json={"automation_id": automation_id, "name": name, "plan": plan, "trigger": trigger},
         )
 
+    async def compose_draft(
+        self, automation_id: str, name: dict[str, Any], composed: dict[str, Any], trigger: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST", "/automations/compose/draft",
+            json={"automation_id": automation_id, "name": name, "composed": composed, "trigger": trigger},
+        )
+
+    async def compose_register(
+        self, automation_id: str, name: dict[str, Any], composed: dict[str, Any], trigger: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST", "/automations/compose/register",
+            json={"automation_id": automation_id, "name": name, "composed": composed, "trigger": trigger},
+        )
+
     async def approve(self, workspace: str, automation_id: str, version: int) -> dict[str, Any]:
         return await self._request(
             "POST", f"/automations/{workspace}/{automation_id}/{version}/state",
