@@ -138,6 +138,7 @@ def build_server(
     host: str = "127.0.0.1",
     port: int = 8765,
     tools_provider: ToolsProvider | None = None,
+    automation_tools: Any = None,
 ):  # type: ignore[no-untyped-def]
     """Bind the NilTools surface onto a FastMCP server. Imports `mcp` lazily.
 
@@ -146,6 +147,8 @@ def build_server(
     `tools_provider` (optional) resolves the backend per connection — pass a `TenantToolsProvider`
     for multi-tenant; default wraps `tools` in a `SingletonToolsProvider` (one shared backend). The
     skill/skeleton resources and any `dynamic_verbs` always reflect the `tools` backend (the default).
+    `automation_tools` (optional `AutomationTools`) adds the registry tools so an agent can author
+    governed automations by talking — bound only when a control-plane registry is configured.
     """
     server = FastMCP(name, instructions=_INSTRUCTIONS, host=host, port=port)
 
@@ -156,7 +159,71 @@ def build_server(
 
         register_dynamic_tools(server, tools, dynamic_verbs)
     _register_skill(server, tools)
+    if automation_tools is not None:
+        _register_automation_tools(server, automation_tools)
     return server
+
+
+def _register_automation_tools(server: Any, auto: Any) -> None:
+    """Bind the Automation Registry tools: draft → register → approve → run, plus list. Each relays to
+    the control plane, preserving the gate (draft = preview-only; register lands pending_approval;
+    run fires only an active automation)."""
+
+    async def nil_automation_draft(
+        automation_id: str, name: dict[str, Any], plan: dict[str, Any], trigger: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await auto.draft(automation_id, name, plan, trigger)
+
+    async def nil_automation_register(
+        automation_id: str, name: dict[str, Any], plan: dict[str, Any], trigger: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await auto.register(automation_id, name, plan, trigger)
+
+    async def nil_automation_compose_register(
+        automation_id: str, name: dict[str, Any], composed: dict[str, Any], trigger: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await auto.compose_register(automation_id, name, composed, trigger)
+
+    async def nil_automation_approve(workspace: str, automation_id: str, version: int) -> dict[str, Any]:
+        return await auto.approve(workspace, automation_id, version)
+
+    async def nil_automation_run(workspace: str, automation_id: str, idempotency_key: str) -> dict[str, Any]:
+        return await auto.run(workspace, automation_id, idempotency_key)
+
+    async def nil_automation_list(workspace: str) -> dict[str, Any]:
+        return await auto.list(workspace)
+
+    server.add_tool(
+        nil_automation_draft, name="nil_automation_draft",
+        description="Preview a governed automation: validate a plan (a Wosool DSL program) + trigger "
+        "against the live backend. NO side effect — returns the validator verdict + content hash, or a "
+        "structured refusal. The deterministic code decides admission, not the agent.",
+    )
+    server.add_tool(
+        nil_automation_register, name="nil_automation_register",
+        description="Register a validated automation into the registry as pending_approval (NOT armed). "
+        "An owner approves it before it can run. Re-registering an identical plan is idempotent.",
+    )
+    server.add_tool(
+        nil_automation_compose_register, name="nil_automation_compose_register",
+        description="Register a CROSS-SYSTEM automation: `composed` = {workspace, stages:[{name, "
+        "adapter, plan, input_from}]}, each stage validated against ITS adapter's live skeleton. "
+        "Handoffs between stages are explicit ($.stage_1.step_2.output.id → next stage's $.input.*). "
+        "Lands pending_approval. Use to wire two backends (e.g. PocketBase → Odoo) into one workflow.",
+    )
+    server.add_tool(
+        nil_automation_approve, name="nil_automation_approve",
+        description="Arm a registered automation (set it active) so it can fire. Operator-grade.",
+    )
+    server.add_tool(
+        nil_automation_run, name="nil_automation_run",
+        description="Fire an ACTIVE automation now (manual trigger). Requires an idempotency_key so a "
+        "re-fire replays rather than executing twice. Returns the run with its terminal state + trace.",
+    )
+    server.add_tool(
+        nil_automation_list, name="nil_automation_list",
+        description="List a workspace's registered automations (latest version of each). No side effect.",
+    )
 
 
 def _register_tools(server: Any, provider: ToolsProvider) -> None:
@@ -392,7 +459,12 @@ def build_asgi_app(
             default=default, allow_insecure=allow_insecure, gate=gate,
             registry=make_registry_lookup(),
         )
-    server = build_server(tools, dynamic_verbs=verbs, tools_provider=provider)
+    from nilscript.mcp.automation_tools import AutomationTools
+
+    server = build_server(
+        tools, dynamic_verbs=verbs, tools_provider=provider,
+        automation_tools=AutomationTools.from_env(),
+    )
     app = server.streamable_http_app()  # MCP mounted at /mcp
 
     # A plain health route for load balancers / readiness probes (not part of MCP).

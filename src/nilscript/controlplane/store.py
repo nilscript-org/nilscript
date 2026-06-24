@@ -58,7 +58,50 @@ CREATE TABLE IF NOT EXISTS adapters (
     updated_at  TEXT    NOT NULL,
     PRIMARY KEY (workspace, adapter_id)
 );
+
+-- Automation Registry (SSOT): one row per VERSION of one automation. Append-only — "editing" an
+-- automation writes a new version and archives the prior one (superseded_by). `content_hash` is the
+-- version lock (sha256 over the validated plan). See docs/PLAN-dynamic-automation-ssot.md.
+CREATE TABLE IF NOT EXISTS automations (
+    workspace     TEXT    NOT NULL DEFAULT '',
+    automation_id TEXT    NOT NULL,
+    version       INTEGER NOT NULL,
+    content_hash  TEXT    NOT NULL,
+    kind          TEXT    NOT NULL DEFAULT 'single',
+    name          TEXT    NOT NULL DEFAULT '{}',
+    description   TEXT,
+    plan          TEXT    NOT NULL,
+    trigger       TEXT    NOT NULL,
+    state         TEXT    NOT NULL DEFAULT 'draft',
+    authored_by   TEXT    NOT NULL DEFAULT '',
+    approved_by   TEXT,
+    created_at    TEXT    NOT NULL,
+    superseded_by INTEGER,
+    PRIMARY KEY (workspace, automation_id, version)
+);
+
+-- Automation runs: one execution of one (pinned) automation version. `run_id` is deterministic
+-- (automation:version:fire) so a re-delivered fire replays the same row, never double-executes.
+CREATE TABLE IF NOT EXISTS automation_runs (
+    run_id        TEXT    PRIMARY KEY,
+    workspace     TEXT    NOT NULL DEFAULT '',
+    automation_id TEXT    NOT NULL,
+    version       INTEGER NOT NULL,
+    content_hash  TEXT    NOT NULL,
+    fired_by      TEXT    NOT NULL DEFAULT '',
+    state         TEXT    NOT NULL DEFAULT 'running',
+    trace         TEXT,
+    started_at    TEXT    NOT NULL,
+    ended_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_runs_auto ON automation_runs(workspace, automation_id, started_at DESC);
 """
+
+# Columns surfaced by the automation registry reads (JSON columns parsed back by `_automation_row`).
+_AUTOMATION_COLS = (
+    "workspace, automation_id, version, content_hash, kind, name, description, plan, trigger, "
+    "state, authored_by, approved_by, created_at, superseded_by"
+)
 
 # Columns surfaced by the registry read methods (bearer included — the API layer redacts for the
 # public list endpoint; `active_adapter` keeps it because the MCP needs it to reach the adapter).
@@ -119,6 +162,12 @@ class EventStore:
                 self._conn.execute("ALTER TABLE events ADD COLUMN event_id TEXT")
             except sqlite3.OperationalError:
                 pass  # column already present
+            try:
+                self._conn.execute(
+                    "ALTER TABLE automations ADD COLUMN kind TEXT NOT NULL DEFAULT 'single'"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already present (or table created fresh with it)
             self._conn.commit()
 
     def ingest(self, envelope: dict[str, Any], sequence: int | None, *, source: str = "") -> bool:
@@ -460,11 +509,26 @@ class EventStore:
             self._conn.commit()
         return True
 
+    def set_adapter_active(self, workspace: str, adapter_id: str, enabled: bool) -> bool:
+        """Enable/disable ONE adapter without touching its siblings (non-exclusive). This is what lets
+        a workspace have several adapters active at once — e.g. PocketBase + Odoo for a cross-system
+        automation. Returns False if no such adapter is registered."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE adapters SET active = ?, updated_at = ? WHERE workspace = ? AND adapter_id = ?",
+                (1 if enabled else 0, _now(), workspace, adapter_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
     def active_adapter(self, workspace: str) -> dict[str, Any] | None:
-        """The workspace's active adapter (WITH bearer — the MCP needs it), or None."""
+        """The workspace's default active adapter for single-backend MCP routing (WITH bearer), or
+        None. With several active, the most-recently-updated wins — composition addresses adapters by
+        id, so multi-active never makes a plain propose/commit ambiguous."""
         with self._lock:
             row = self._conn.execute(
-                f"SELECT {_ADAPTER_COLS} FROM adapters WHERE workspace = ? AND active = 1 LIMIT 1",
+                f"SELECT {_ADAPTER_COLS} FROM adapters WHERE workspace = ? AND active = 1 "
+                "ORDER BY updated_at DESC LIMIT 1",
                 (workspace,),
             ).fetchone()
         return dict(row) if row is not None else None
@@ -486,3 +550,207 @@ class EventStore:
             (workspace, adapter_id),
         ).fetchone()
         return dict(row) if row is not None else None
+
+    # ── automation registry (SSOT, append-only versions) ─────────────────────────────────────
+    @staticmethod
+    def _automation_row(row: sqlite3.Row) -> dict[str, Any]:
+        """Deserialize the JSON columns (name/description/plan/trigger) back into dicts."""
+        rec = dict(row)
+        rec["name"] = _loads(rec.get("name"))
+        rec["plan"] = _loads(rec.get("plan"))
+        rec["trigger"] = _loads(rec.get("trigger"))
+        rec["description"] = _loads(rec["description"]) if rec.get("description") else None
+        return rec
+
+    def register_automation(
+        self,
+        *,
+        workspace: str,
+        automation_id: str,
+        content_hash: str,
+        name: dict[str, Any],
+        plan: dict[str, Any],
+        trigger: dict[str, Any],
+        state: str = "draft",
+        kind: str = "single",
+        authored_by: str = "",
+        description: dict[str, Any] | None = None,
+        approved_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Append a new version. Re-registering an identical plan (same `content_hash` as the latest
+        version) is an idempotent no-op — returns the existing row, no new version. Otherwise the
+        prior latest version is archived and marked `superseded_by` the new version."""
+        with self._lock:
+            latest = self._conn.execute(
+                "SELECT version, content_hash FROM automations "
+                "WHERE workspace = ? AND automation_id = ? ORDER BY version DESC LIMIT 1",
+                (workspace, automation_id),
+            ).fetchone()
+            if latest is not None and latest["content_hash"] == content_hash:
+                row = self._conn.execute(
+                    f"SELECT {_AUTOMATION_COLS} FROM automations "
+                    "WHERE workspace = ? AND automation_id = ? AND version = ?",
+                    (workspace, automation_id, latest["version"]),
+                ).fetchone()
+                return self._automation_row(row)
+            version = (latest["version"] + 1) if latest is not None else 1
+            if latest is not None:
+                self._conn.execute(
+                    "UPDATE automations SET superseded_by = ?, state = 'archived' "
+                    "WHERE workspace = ? AND automation_id = ? AND version = ?",
+                    (version, workspace, automation_id, latest["version"]),
+                )
+            self._conn.execute(
+                "INSERT INTO automations (workspace, automation_id, version, content_hash, kind, name, "
+                "description, plan, trigger, state, authored_by, approved_by, created_at, superseded_by) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                (
+                    workspace, automation_id, version, content_hash, kind,
+                    json.dumps(name, ensure_ascii=False),
+                    json.dumps(description, ensure_ascii=False) if description is not None else None,
+                    json.dumps(plan, ensure_ascii=False),
+                    json.dumps(trigger, ensure_ascii=False),
+                    state, authored_by, approved_by, _now(),
+                ),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                f"SELECT {_AUTOMATION_COLS} FROM automations "
+                "WHERE workspace = ? AND automation_id = ? AND version = ?",
+                (workspace, automation_id, version),
+            ).fetchone()
+        return self._automation_row(row)
+
+    def get_automation(
+        self, workspace: str, automation_id: str, version: int | None = None
+    ) -> dict[str, Any] | None:
+        """A specific version, or the latest (highest version) when `version` is None."""
+        with self._lock:
+            if version is None:
+                row = self._conn.execute(
+                    f"SELECT {_AUTOMATION_COLS} FROM automations "
+                    "WHERE workspace = ? AND automation_id = ? ORDER BY version DESC LIMIT 1",
+                    (workspace, automation_id),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    f"SELECT {_AUTOMATION_COLS} FROM automations "
+                    "WHERE workspace = ? AND automation_id = ? AND version = ?",
+                    (workspace, automation_id, version),
+                ).fetchone()
+        return self._automation_row(row) if row is not None else None
+
+    def list_automations(self, workspace: str) -> list[dict[str, Any]]:
+        """The latest version of every automation in the workspace, by automation_id."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_AUTOMATION_COLS} FROM automations a WHERE workspace = ? AND version = "
+                "(SELECT MAX(version) FROM automations b "
+                " WHERE b.workspace = a.workspace AND b.automation_id = a.automation_id) "
+                "ORDER BY automation_id",
+                (workspace,),
+            ).fetchall()
+        return [self._automation_row(r) for r in rows]
+
+    def all_automations(self) -> list[dict[str, Any]]:
+        """Latest version of every automation across ALL workspaces — for the dashboard."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_AUTOMATION_COLS} FROM automations a WHERE version = "
+                "(SELECT MAX(version) FROM automations b "
+                " WHERE b.workspace = a.workspace AND b.automation_id = a.automation_id) "
+                "ORDER BY workspace, automation_id"
+            ).fetchall()
+        return [self._automation_row(r) for r in rows]
+
+    def active_automations(self) -> list[dict[str, Any]]:
+        """Every armed automation across all workspaces (state='active'). The scheduler scans these.
+        The supersede-on-edit invariant means the active version is always the latest one."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_AUTOMATION_COLS} FROM automations WHERE state = 'active' "
+                "ORDER BY workspace, automation_id"
+            ).fetchall()
+        return [self._automation_row(r) for r in rows]
+
+    def set_automation_state(
+        self,
+        workspace: str,
+        automation_id: str,
+        version: int,
+        state: str,
+        *,
+        approved_by: str | None = None,
+    ) -> bool:
+        """Transition one version's lifecycle state (draft→pending_approval→active⇄paused→archived).
+        Records `approved_by` when supplied. Returns False if no such version exists."""
+        with self._lock:
+            if approved_by is not None:
+                cur = self._conn.execute(
+                    "UPDATE automations SET state = ?, approved_by = ? "
+                    "WHERE workspace = ? AND automation_id = ? AND version = ?",
+                    (state, approved_by, workspace, automation_id, version),
+                )
+            else:
+                cur = self._conn.execute(
+                    "UPDATE automations SET state = ? "
+                    "WHERE workspace = ? AND automation_id = ? AND version = ?",
+                    (state, workspace, automation_id, version),
+                )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    # ── automation runs (P2 dispatcher) ──────────────────────────────────────────────────────
+    def start_run(
+        self, run_id: str, *, workspace: str, automation_id: str, version: int, content_hash: str,
+        fired_by: str = "",
+    ) -> bool:
+        """Open a run row (state=running). Returns False if `run_id` already exists — the caller must
+        then treat the fire as an idempotent replay and NOT re-execute (a re-delivered trigger)."""
+        with self._lock:
+            if self._conn.execute(
+                "SELECT 1 FROM automation_runs WHERE run_id = ?", (run_id,)
+            ).fetchone():
+                return False
+            self._conn.execute(
+                "INSERT INTO automation_runs (run_id, workspace, automation_id, version, "
+                "content_hash, fired_by, state, started_at) VALUES (?,?,?,?,?,?, 'running', ?)",
+                (run_id, workspace, automation_id, version, content_hash, fired_by, _now()),
+            )
+            self._conn.commit()
+        return True
+
+    def finish_run(self, run_id: str, state: str, trace: dict[str, Any] | None) -> bool:
+        """Close a run with its terminal state and the executor trace. Returns False if unknown."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE automation_runs SET state = ?, trace = ?, ended_at = ? WHERE run_id = ?",
+                (state, json.dumps(trace, ensure_ascii=False) if trace is not None else None,
+                 _now(), run_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT run_id, workspace, automation_id, version, content_hash, fired_by, state, "
+                "trace, started_at, ended_at FROM automation_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        rec = dict(row)
+        rec["trace"] = _loads(rec.get("trace")) if rec.get("trace") else None
+        return rec
+
+    def list_runs(self, workspace: str, automation_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Newest-first run history for one automation (trace omitted — fetch via get_run)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT run_id, workspace, automation_id, version, content_hash, fired_by, state, "
+                "started_at, ended_at FROM automation_runs "
+                "WHERE workspace = ? AND automation_id = ? ORDER BY started_at DESC LIMIT ?",
+                (workspace, automation_id, max(1, min(limit, 500))),
+            ).fetchall()
+        return [dict(r) for r in rows]

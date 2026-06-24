@@ -8,16 +8,66 @@ with NIL_EVENTS_SECRET. The UI at / shows every action across all agents in one 
 
 from __future__ import annotations
 
+import asyncio
+import datetime as _dt
 import hashlib
 import hmac
 import json
 import os
 from typing import Any
 
+from collections.abc import Awaitable, Callable
+
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import ValidationError
 
+from nilscript.automation import (
+    Runner,
+    composed_hash,
+    context_from_skeleton,
+    dispatch_event,
+    draft_automation,
+    fire_composed,
+    fire_manual,
+    parse_composed,
+    parse_trigger,
+    register,
+    run_due_schedules,
+    validate_composed,
+)
+from nilscript.automation.compose import StageRunner
 from nilscript.controlplane.store import EventStore
+from nilscript.kernel.diagnostics import ValidationResult
+from nilscript.kernel.executor import LocalExecutor
+from nilscript.sdk.client import NilClient
+from nilscript.sdk.connect import handshake
+from nilscript.sdk.grants import GrantRef
+from nilscript.sdk.transport import NilTransport
+
+
+def _plan_scopes(plan: dict[str, Any]) -> frozenset[str]:
+    """Grant scopes for a control-plane-fired run: each verb plus its `skill.*` wildcard."""
+    scopes: set[str] = set()
+    for node in plan.get("pipeline", []) if isinstance(plan, dict) else []:
+        verb = node.get("verb") if isinstance(node, dict) else None
+        if isinstance(verb, str) and verb:
+            scopes.add(verb)
+            scopes.add(verb.split(".", 1)[0] + ".*")
+    return frozenset(scopes) or frozenset({"*"})
+
+# An async source of a workspace's live adapter skeleton ({verbs, targets, ...}), or None when there
+# is no reachable/conformant active adapter. Injectable so the draft gate is testable without a backend.
+SkeletonProvider = Callable[[str], Awaitable[dict[str, Any] | None]]
+# Skeleton of a SPECIFIC adapter by id (for cross-system composed plans). (workspace, adapter_id) -> skeleton|None.
+AdapterSkeletonProvider = Callable[[str, str], Awaitable[dict[str, Any] | None]]
+
+
+def _diag_list(result: ValidationResult) -> list[dict[str, Any]]:
+    return [
+        {"code": d.code, "severity": d.severity, "message": d.message, "node": d.node}
+        for d in result.diagnostics
+    ]
 
 
 def _redact(adapter: dict[str, Any]) -> dict[str, Any]:
@@ -33,6 +83,10 @@ def create_app(
     store: EventStore | None = None, *,
     secret: str | None = None,
     registry_token: str | None = None,
+    skeleton_provider: SkeletonProvider | None = None,
+    runner: Runner | None = None,
+    adapter_skeleton_provider: AdapterSkeletonProvider | None = None,
+    stage_runner: StageRunner | None = None,
 ) -> FastAPI:
     store = store if store is not None else EventStore()
     secret = secret if secret is not None else os.environ.get("NIL_EVENTS_SECRET", "")
@@ -48,6 +102,93 @@ def create_app(
         if not registry_token:
             return True
         return bool(authorization) and hmac.compare_digest(authorization, f"Bearer {registry_token}")
+
+    async def _live_skeleton(workspace: str) -> dict[str, Any] | None:
+        """Default skeleton source: discover the workspace's active adapter over NIL. None when there
+        is no active adapter, it's unreachable, or it doesn't answer with a conformant describe."""
+        active = store.active_adapter(workspace)
+        if not active or not active.get("url"):
+            return None
+        transport = NilTransport(base_url=active["url"], bearer_secret=active.get("bearer", "") or "")
+        try:
+            report = await handshake(transport)
+        finally:
+            await transport.aclose()
+        if not report.get("reachable") or not report.get("conformant"):
+            return None
+        return report
+
+    provider: SkeletonProvider = skeleton_provider or _live_skeleton
+
+    async def _live_runner(plan: dict[str, Any], *, run_id: str) -> Any:
+        """Default runner: walk the pinned plan against the workspace's active adapter via a headless
+        LocalExecutor. The adapter bearer is the transport auth; the grant scopes are the plan's own
+        verbs. (Production grant minting is the one knob to revisit when CP-initiated runs need a
+        distinct identity from the adapter bearer.)"""
+        ws = plan.get("workspace", "") if isinstance(plan, dict) else ""
+        active = store.active_adapter(ws)
+        if not active or not active.get("url"):
+            raise RuntimeError(f"no active adapter for workspace {ws!r}")
+        bearer = active.get("bearer", "") or ""
+        transport = NilTransport(base_url=active["url"], bearer_secret=bearer)
+        grant = GrantRef.from_secret(
+            grant_id="control-plane", workspace=ws, secret=bearer or "cp",
+            scopes=_plan_scopes(plan),
+        )
+        client = NilClient(transport=transport, grant=grant)
+        try:
+            executor = LocalExecutor(
+                client, run_id=run_id, session_id=run_id, locale=plan.get("locale", "ar")
+            )
+            return await executor.execute(plan)
+        finally:
+            await transport.aclose()
+
+    run_exec: Runner = runner or _live_runner
+
+    async def _live_adapter_skeleton(workspace: str, adapter_id: str) -> dict[str, Any] | None:
+        """Discover a SPECIFIC registered adapter (by id) over NIL — for composed-plan validation,
+        where each stage names its own backend (which may not be the workspace's active one)."""
+        match = next(
+            (a for a in store.list_adapters(workspace)
+             if a.get("adapter_id") == adapter_id and a.get("url")),
+            None,
+        )
+        if match is None:
+            return None
+        transport = NilTransport(base_url=match["url"], bearer_secret=match.get("bearer", "") or "")
+        try:
+            report = await handshake(transport)
+        finally:
+            await transport.aclose()
+        return report if report.get("reachable") and report.get("conformant") else None
+
+    adapter_skeletons: AdapterSkeletonProvider = adapter_skeleton_provider or _live_adapter_skeleton
+
+    async def _live_stage_runner(adapter: str, plan: dict[str, Any], *, run_id: str, input: dict[str, Any]) -> Any:
+        """Run one composed stage against the named adapter (by id) via a headless LocalExecutor."""
+        ws = plan.get("workspace", "") if isinstance(plan, dict) else ""
+        match = next(
+            (a for a in store.list_adapters(ws) if a.get("adapter_id") == adapter and a.get("url")),
+            None,
+        )
+        if match is None:
+            raise RuntimeError(f"no registered adapter {adapter!r} in workspace {ws!r}")
+        bearer = match.get("bearer", "") or ""
+        transport = NilTransport(base_url=match["url"], bearer_secret=bearer)
+        grant = GrantRef.from_secret(
+            grant_id="control-plane", workspace=ws, secret=bearer or "cp", scopes=_plan_scopes(plan),
+        )
+        client = NilClient(transport=transport, grant=grant)
+        try:
+            return await LocalExecutor(
+                client, run_id=run_id, session_id=run_id, locale=plan.get("locale", "ar")
+            ).execute(plan, input=input or None)
+        finally:
+            await transport.aclose()
+
+    stage_exec: StageRunner = stage_runner or _live_stage_runner
+    _bg_tasks: set[asyncio.Task[Any]] = set()  # keep fire-and-forget dispatch tasks from being GC'd
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
@@ -71,6 +212,13 @@ def create_app(
             return JSONResponse({"error": "bad json"}, status_code=400)
         seq = int(x_nil_sequence) if (x_nil_sequence and x_nil_sequence.lstrip("-").isdigit()) else None
         new = store.ingest(envelope, seq, source=x_nil_source or "mcp")
+        if new:
+            # Fire event-triggered automations off the request path — ingest must stay fast and must
+            # not block on (or fail because of) a downstream run. The loop guard in dispatch_event
+            # skips events that triggered runs themselves produced.
+            task = asyncio.create_task(dispatch_event(store, envelope, runner=run_exec))
+            _bg_tasks.add(task)
+            task.add_done_callback(_bg_tasks.discard)
         return {"ok": True, "new": new}
 
     @app.get("/api/events")
@@ -119,6 +267,47 @@ def create_app(
     def adapters() -> dict[str, Any]:
         return {"adapters": store.adapters()}
 
+    @app.get("/api/adapter-skeleton")
+    async def api_adapter_skeleton(
+        workspace: str = "", adapter_id: str = "", authorization: str | None = Header(default=None),
+    ) -> Any:
+        """The verbs (and target names) a specific adapter declares — feeds the UI compose form's verb
+        dropdowns. Token-gated: it triggers a live handshake using the adapter's bearer."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        skeleton = await adapter_skeletons(workspace, adapter_id)
+        if skeleton is None:
+            return JSONResponse({"error": "adapter not reachable/conformant"}, status_code=503)
+        return {
+            "verbs": skeleton.get("verbs", []),
+            "targets": sorted((skeleton.get("targets") or {}).keys()),
+        }
+
+    @app.get("/api/automations")
+    def api_automations() -> dict[str, Any]:
+        """Dashboard view of every automation (latest version, all workspaces). Public read — no
+        secrets in the record; the heavy plan is summarised, not shipped whole."""
+        out: list[dict[str, Any]] = []
+        for a in store.all_automations():
+            plan = a.get("plan") or {}
+            if a.get("kind") == "composed":
+                stages = plan.get("stages") or []
+                summary = {
+                    "stages": len(stages),
+                    "adapters": sorted({s.get("adapter") for s in stages if isinstance(s, dict)}),
+                }
+            else:
+                summary = {"nodes": len(plan.get("pipeline") or [])}
+            out.append({
+                "workspace": a["workspace"], "automation_id": a["automation_id"],
+                "version": a["version"], "content_hash": a["content_hash"],
+                "kind": a.get("kind", "single"), "name": a.get("name") or {},
+                "state": a["state"], "trigger": a.get("trigger") or {},
+                "approved_by": a.get("approved_by"), "authored_by": a.get("authored_by"),
+                "created_at": a.get("created_at"), "plan_summary": summary,
+            })
+        return {"automations": out}
+
     # ── active-adapter registry (multi-tenant routing) ───────────────────────────────────────
     @app.post("/adapters/register")
     async def register_adapter(request: Request, authorization: str | None = Header(default=None)) -> Any:
@@ -147,6 +336,25 @@ def create_app(
             return JSONResponse({"error": "no such adapter"}, status_code=404)
         return {"ok": True, "workspace": workspace, "adapter_id": adapter_id}
 
+    @app.post("/adapters/{workspace}/{adapter_id}/enable")
+    def enable_adapter(workspace: str, adapter_id: str, authorization: str | None = Header(default=None)) -> Any:
+        """Enable an adapter WITHOUT deactivating siblings — several can be active at once (e.g.
+        PocketBase + Odoo for a cross-system automation). Operator-gated."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if not store.set_adapter_active(workspace, adapter_id, True):
+            return JSONResponse({"error": "no such adapter"}, status_code=404)
+        return {"ok": True, "workspace": workspace, "adapter_id": adapter_id, "active": True}
+
+    @app.post("/adapters/{workspace}/{adapter_id}/disable")
+    def disable_adapter(workspace: str, adapter_id: str, authorization: str | None = Header(default=None)) -> Any:
+        """Disable one adapter (leaves siblings untouched). Operator-gated."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if not store.set_adapter_active(workspace, adapter_id, False):
+            return JSONResponse({"error": "no such adapter"}, status_code=404)
+        return {"ok": True, "workspace": workspace, "adapter_id": adapter_id, "active": False}
+
     @app.get("/adapters")
     def list_adapters(workspace: str = "") -> dict[str, Any]:
         """List a workspace's registered adapters for the UI — bearer REDACTED (public read)."""
@@ -169,6 +377,246 @@ def create_app(
         if active is None:
             return JSONResponse({"error": "no active adapter"}, status_code=404)
         return {"adapter": active}
+
+    # ── automation registry (conversation-authored, deterministically lowered, SSOT-stored) ─────
+    async def _draft_from_body(body: dict[str, Any]) -> tuple[Any, Any]:
+        """Validate a draft request against the workspace's live skeleton. Returns (DraftResult, None)
+        or (None, JSONResponse-error). The plan's own `workspace` selects the adapter to validate
+        against, so the lowered plan is bounded by the backend that will actually run it."""
+        plan = body.get("plan")
+        aid, name, trigger = body.get("automation_id"), body.get("name"), body.get("trigger")
+        if not isinstance(plan, dict) or not aid or name is None or trigger is None:
+            return None, JSONResponse(
+                {"error": "automation_id, name, plan, trigger are required"}, status_code=400
+            )
+        ws = plan.get("workspace")
+        if not ws:
+            return None, JSONResponse({"error": "plan.workspace is required"}, status_code=400)
+        skeleton = await provider(ws)
+        if skeleton is None:
+            return None, JSONResponse(
+                {"error": "no reachable active adapter for this workspace"}, status_code=503
+            )
+        ctx = context_from_skeleton(ws, skeleton)
+        try:
+            res = draft_automation(
+                automation_id=aid, name=name, raw_plan=plan, trigger=trigger, ctx=ctx,
+                authored_by=body.get("authored_by", "") or "", description=body.get("description"),
+            )
+        except (ValidationError, ValueError) as exc:
+            return None, JSONResponse({"error": f"malformed request: {exc}"}, status_code=400)
+        return res, None
+
+    @app.post("/automations/draft")
+    async def automation_draft(request: Request, authorization: str | None = Header(default=None)) -> Any:
+        """Preview: lower the agent's candidate plan against the live skeleton. No side effect.
+        Returns the validator verdict + content-hash, or a structured refusal."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "bad json"}, status_code=400)
+        res, err = await _draft_from_body(body)
+        if err is not None:
+            return err
+        if not res.ok:
+            return {"ok": False, "refusal": _diag_list(res.diagnostics)}
+        return {
+            "ok": True,
+            "content_hash": res.content_hash,
+            "definition": res.definition.model_dump(by_alias=True, mode="json"),
+        }
+
+    @app.post("/automations/register")
+    async def automation_register(request: Request, authorization: str | None = Header(default=None)) -> Any:
+        """Persist a passing draft to the SSOT as `pending_approval` (never auto-armed). Re-registering
+        an identical plan is an idempotent no-op. A failing plan is refused — never stored."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "bad json"}, status_code=400)
+        res, err = await _draft_from_body(body)
+        if err is not None:
+            return err
+        if not res.ok:
+            return JSONResponse({"ok": False, "refusal": _diag_list(res.diagnostics)}, status_code=400)
+        stored = register(store, res.definition)  # lands in pending_approval
+        return {"ok": True, "definition": stored.model_dump(by_alias=True, mode="json")}
+
+    # ── cross-system composed automations (P3) ──────────────────────────────────────────────
+    async def _validate_composed_body(body: dict[str, Any]) -> tuple[Any, Any]:
+        """Validate a composed-plan request: each stage against ITS adapter's live skeleton + handoff
+        well-formedness + a valid trigger. Returns ((composed_raw, report), None) or (None, error)."""
+        composed = body.get("composed")
+        aid, name, trigger = body.get("automation_id"), body.get("name"), body.get("trigger")
+        if not isinstance(composed, dict) or not aid or name is None or trigger is None:
+            return None, JSONResponse(
+                {"error": "automation_id, name, composed, trigger are required"}, status_code=400
+            )
+        ws = composed.get("workspace")
+        if not ws:
+            return None, JSONResponse({"error": "composed.workspace is required"}, status_code=400)
+        try:
+            parse_trigger(trigger)
+        except (ValidationError, ValueError, TypeError) as exc:
+            return None, JSONResponse({"error": f"bad trigger: {exc}"}, status_code=400)
+        stages = composed.get("stages") or []
+        adapter_ids = {s.get("adapter") for s in stages if isinstance(s, dict)}
+        skeletons: dict[str, Any] = {}
+        for adapter_id in adapter_ids:
+            skeleton = await adapter_skeletons(ws, adapter_id)
+            if skeleton is None:
+                return None, JSONResponse(
+                    {"error": f"no reachable adapter {adapter_id!r} in workspace {ws!r}"},
+                    status_code=503,
+                )
+            skeletons[adapter_id] = skeleton
+        try:
+            parsed = parse_composed(composed)
+        except (KeyError, TypeError) as exc:
+            return None, JSONResponse({"error": f"malformed composed plan: {exc}"}, status_code=400)
+        return (composed, validate_composed(parsed, skeletons)), None
+
+    @app.post("/automations/compose/draft")
+    async def compose_draft(request: Request, authorization: str | None = Header(default=None)) -> Any:
+        """Preview: validate a cross-system composed plan, each stage against its adapter. No effect."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "bad json"}, status_code=400)
+        res, err = await _validate_composed_body(body)
+        if err is not None:
+            return err
+        composed, report = res
+        if not report["ok"]:
+            return {"ok": False, "report": report}
+        return {"ok": True, "content_hash": composed_hash(composed), "report": report}
+
+    @app.post("/automations/compose/register")
+    async def compose_register(request: Request, authorization: str | None = Header(default=None)) -> Any:
+        """Persist a passing composed plan as `pending_approval` (kind='composed')."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "bad json"}, status_code=400)
+        res, err = await _validate_composed_body(body)
+        if err is not None:
+            return err
+        composed, report = res
+        if not report["ok"]:
+            return JSONResponse({"ok": False, "report": report}, status_code=400)
+        stored = store.register_automation(
+            workspace=composed["workspace"], automation_id=body["automation_id"],
+            content_hash=composed_hash(composed), name=body["name"], plan=composed,
+            trigger=body["trigger"], state="pending_approval", kind="composed",
+            authored_by=body.get("authored_by", "") or "", description=body.get("description"),
+        )
+        return {"ok": True, "definition": stored}
+
+    @app.get("/automations")
+    def automations_list(workspace: str = "") -> dict[str, Any]:
+        """Latest version of every automation in a workspace (public read — no secrets in the record)."""
+        return {"automations": store.list_automations(workspace)}
+
+    @app.get("/automations/{workspace}/{automation_id}")
+    def automation_get(workspace: str, automation_id: str, version: int | None = None) -> Any:
+        a = store.get_automation(workspace, automation_id, version)
+        if a is None:
+            return JSONResponse({"error": "no such automation"}, status_code=404)
+        return a
+
+    @app.post("/automations/{workspace}/{automation_id}/{version}/state")
+    async def automation_set_state(
+        workspace: str, automation_id: str, version: int, request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> Any:
+        """Arm/disarm/approve an automation (operator-gated). Approving (→ active) records the owner.
+        Arming a recurring automation is a governance act, so it sits behind the registry token."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "bad json"}, status_code=400)
+        state = body.get("state")
+        if state not in ("pending_approval", "active", "paused", "archived"):
+            return JSONResponse(
+                {"error": "state must be pending_approval|active|paused|archived"}, status_code=400
+            )
+        ok = store.set_automation_state(
+            workspace, automation_id, version, state, approved_by=body.get("approved_by")
+        )
+        if not ok:
+            return JSONResponse({"error": "no such automation version"}, status_code=404)
+        return {"ok": True, "automation": store.get_automation(workspace, automation_id, version)}
+
+    @app.post("/automations/{workspace}/{automation_id}/run")
+    async def automation_run(
+        workspace: str, automation_id: str, request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> Any:
+        """Fire the active automation now (manual trigger). Requires an `idempotency_key` so a
+        re-delivered fire replays the same run rather than executing twice. Operator-gated."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            body = {}
+        idem = body.get("idempotency_key")
+        if not idem or len(str(idem)) < 6:
+            return JSONResponse(
+                {"error": "idempotency_key (>= 6 chars) is required"}, status_code=400
+            )
+        fired_by = body.get("fired_by", "manual") or "manual"
+        auto = store.get_automation(workspace, automation_id)
+        if auto is not None and auto.get("kind") == "composed":
+            out = await fire_composed(
+                store, workspace=workspace, automation_id=automation_id,
+                idempotency_key=str(idem), stage_runner=stage_exec, fired_by=fired_by,
+            )
+        else:
+            out = await fire_manual(
+                store, workspace=workspace, automation_id=automation_id,
+                idempotency_key=str(idem), runner=run_exec, fired_by=fired_by,
+            )
+        if not out.get("ok"):
+            return JSONResponse(out, status_code=out.pop("status", 400))
+        return out
+
+    @app.post("/automations/tick")
+    async def automations_tick(authorization: str | None = Header(default=None)) -> Any:
+        """Fire interval-scheduled automations that are due. Called by an external clock (cron /
+        Temporal Schedule) — the control plane decides *which* are due; the caller owns the tick.
+        Operator-gated."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        now = _dt.datetime.now(_dt.UTC)
+        fired = await run_due_schedules(store, runner=run_exec, now=now)
+        return {
+            "ok": True,
+            "fired": len(fired),
+            "runs": [f["run"] for f in fired if f.get("ok") and f.get("run")],
+        }
+
+    @app.get("/automations/{workspace}/{automation_id}/runs")
+    def automation_runs(workspace: str, automation_id: str, limit: int = 50) -> dict[str, Any]:
+        """Newest-first run history for one automation (trace omitted — fetch via /runs/{run_id})."""
+        return {"runs": store.list_runs(workspace, automation_id, limit)}
+
+    @app.get("/runs/{run_id}")
+    def run_detail(run_id: str) -> Any:
+        run = store.get_run(run_id)
+        if run is None:
+            return JSONResponse({"error": "no such run"}, status_code=404)
+        return run
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -359,6 +807,57 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
   .acard .st b{color:var(--fg)}
   .acard .ch{color:var(--faint);font-size:11px;margin-top:6px}
 
+  /* ── automations ── */
+  #autoWrap{margin-bottom:26px;display:none}
+  .auth-row{display:flex;align-items:center;gap:8px;margin:0 2px 12px;flex-wrap:wrap}
+  .auth-row input{background:var(--elev);border:1px solid var(--line2);border-radius:8px;color:var(--fg);
+    font:12px var(--mono);padding:6px 10px;width:230px;max-width:60vw}
+  .auth-row .hint{color:var(--faint);font-size:11px}
+  .auth-row .ok{color:var(--green);font-size:11px}
+  #automations{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+  .autocard{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);
+    padding:14px 16px;position:relative;overflow:hidden}
+  .autocard::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--faint)}
+  .autocard.s-active::before{background:var(--green)}
+  .autocard.s-pending_approval::before{background:var(--amber)}
+  .autocard.s-paused::before{background:var(--blue)}
+  .autocard.s-archived::before{background:var(--line2)}
+  .autocard .top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .autocard .nm{font-weight:600;color:var(--verb);font-size:14.5px;flex:1 1 auto;min-width:0;word-break:break-word}
+  .sbadge{font-size:11px;padding:2px 9px;border-radius:999px;border:1px solid var(--line2);color:var(--mut);white-space:nowrap}
+  .sbadge.s-active{color:var(--green);border-color:rgba(70,194,102,.45);background:rgba(70,194,102,.08)}
+  .sbadge.s-pending_approval{color:#f0c674;border-color:rgba(224,166,41,.45);background:rgba(224,166,41,.08)}
+  .sbadge.s-paused{color:var(--blue);border-color:rgba(91,140,255,.35);background:rgba(91,140,255,.08)}
+  .sbadge.s-draft,.sbadge.s-archived{color:var(--faint)}
+  .autocard .meta{display:flex;flex-wrap:wrap;gap:6px;margin:9px 0 4px}
+  .autocard .meta span{font-size:11px;color:var(--mut);border:1px solid var(--line2);border-radius:6px;padding:1px 7px}
+  .autocard .meta .kind{color:var(--violet);border-color:rgba(168,119,247,.3)}
+  .autocard .meta .trig{color:var(--blue);border-color:rgba(91,140,255,.3)}
+  .autocard .sub{color:var(--faint);font-size:11px;margin-top:5px;word-break:break-all}
+  .autocard .acts{display:flex;gap:7px;margin-top:11px;flex-wrap:wrap}
+  .autocard .runs{margin-top:10px;border-top:1px solid var(--line);padding-top:9px;display:none}
+  .autocard .runs.open{display:block}
+  .runrow{display:flex;align-items:center;gap:8px;font-size:11.5px;padding:3px 0;color:var(--mut)}
+  .runrow .rst{padding:1px 7px;border-radius:5px;border:1px solid var(--line2);font-size:10.5px}
+  .runrow .rst.completed{color:var(--green);border-color:rgba(70,194,102,.4)}
+  .runrow .rst.failed,.runrow .rst.blocked{color:#ff9a90;border-color:rgba(251,90,78,.4)}
+  .runrow .rst.partial,.runrow .rst.compensated{color:#f0c674;border-color:rgba(224,166,41,.45)}
+  .runrow .rst.running{color:var(--blue);border-color:rgba(91,140,255,.35)}
+  /* compose form */
+  .cform{border:1px solid var(--line2);border-radius:var(--radius);background:var(--panel);
+    padding:14px 16px;display:grid;gap:10px;margin-bottom:14px}
+  .cform input,.cform select,.cform textarea{background:var(--elev);border:1px solid var(--line2);
+    border-radius:8px;color:var(--fg);font:12px var(--mono);padding:7px 10px;width:100%}
+  .cform textarea{min-height:46px;resize:vertical}
+  .cform .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .cform .ids{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .stageblk{border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:grid;gap:8px}
+  .stageblk .stitle{color:var(--verb);font-size:12px;font-weight:600}
+  .stageblk.b2{border-color:rgba(168,119,247,.3)}
+  .cform .handoff{display:flex;align-items:center;gap:8px;color:var(--mut);font-size:12px;flex-wrap:wrap}
+  .cform .handoff input{width:auto;flex:1 1 120px}
+  .arrow{color:var(--violet);font-weight:600}
+
   /* toast */
   #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(20px);
     background:var(--elev);border:1px solid var(--line2);color:var(--fg);padding:11px 16px;
@@ -398,6 +897,36 @@ _INDEX_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
     <div class=sec-title>Adapters <span class=n id=acount>0</span>
       <span style="color:var(--faint);text-transform:none;letter-spacing:0">— backends linked &amp; live, derived from the stream</span></div>
     <div id=adapters></div>
+  </section>
+
+  <section id=autoWrap>
+    <div class=sec-title>Automations <span class=n id=autocount>0</span>
+      <span style="color:var(--faint);text-transform:none;letter-spacing:0">— conversation-authored workflows: state, trigger, version &amp; run history</span></div>
+    <div class=auth-row>
+      <input id=optoken type=password placeholder="operator token (for controls)" autocomplete=off oninput=saveToken()>
+      <span class=hint id=tokhint>controls (approve / pause / run) need the registry token — view is open</span>
+      <button class="btn tiny" onclick=toggleCompose()>＋ New cross-system automation</button>
+    </div>
+    <div id=composeForm style=display:none>
+      <div class=cform>
+        <div class=ids><input id=cf_id placeholder="automation id (e.g. lead-to-invoice)">
+          <input id=cf_name placeholder="name"></div>
+        <div class="stageblk b1">
+          <div class=stitle>Stage 1 — system A</div>
+          <div class=row2><select id=cf_a1 onchange="loadVerbs('cf_v1',this.value)"></select><select id=cf_v1></select></div>
+          <textarea id=cf_args1 placeholder='args JSON — e.g. {"name":"Acme Co"}'></textarea>
+        </div>
+        <div class="stageblk b2">
+          <div class=stitle>Stage 2 — system B</div>
+          <div class=row2><select id=cf_a2 onchange="loadVerbs('cf_v2',this.value)"></select><select id=cf_v2></select></div>
+          <textarea id=cf_args2 placeholder='args JSON — use $.input.X for handoff, e.g. {"ref":"$.input.lead"}'></textarea>
+          <div class=handoff>handoff: <input id=cf_hk placeholder="input key (e.g. lead)">
+            <span class=arrow>←</span> <input id=cf_hr value="$.stage_1.step_1.output.state"></div>
+        </div>
+        <button class="btn ok" onclick=submitCompose()>Create automation</button>
+      </div>
+    </div>
+    <div id=automations></div>
   </section>
 
   <div class=sec-title>Activity <span style="color:var(--faint);text-transform:none;letter-spacing:0">— every agent action, one pane</span></div>
@@ -616,25 +1145,149 @@ async function loadAdapters(){
 function host(u){try{return new URL(u).host;}catch(e){return u||'';}}
 async function loadRouting(){
  try{
-  const r=await fetch('/api/registry');const {adapters}=await r.json();
+  const r=await fetch('/api/registry');const data=await r.json();const adapters=data.adapters||[];const ws=data.workspace||'';
   const wrap=document.getElementById('routingWrap'),box=document.getElementById('routing');
   document.getElementById('rcount').textContent=adapters.length;
   wrap.style.display=adapters.length?'block':'none';
   box.innerHTML=adapters.map(a=>{
    const on=!!a.active;
+   const tgl=on
+     ? abtn('⏻ Disable','ghost',`adapterToggle('${esc(ws)}','${esc(a.adapter_id)}',false)`)
+     : abtn('⏼ Enable','ok',`adapterToggle('${esc(ws)}','${esc(a.adapter_id)}',true)`);
    return `<div class="rrow ${on?'on':''}">
      <span class=nm>${esc(a.label||a.adapter_id)}</span>
      <span class=sys>${esc(a.system||a.adapter_id)}</span>
      <span class=host>${esc(host(a.url))}</span>
      <span class=grow></span>
      <span class="rbadge ${on?'on':''}">${on?'● active':'idle'}</span>
+     ${tgl}
    </div>`;
   }).join('');
  }catch(_){}
 }
+async function adapterToggle(ws,id,enable){
+  if(!tokenVal())return toast('Enter the <b>operator token</b> (Automations section) to toggle adapters.');
+  try{const r=await fetch(`/adapters/${ws}/${id}/${enable?'enable':'disable'}`,{method:'POST',headers:authHeaders()});
+    if(r.status===401)return toast('Operator token rejected.');
+    toast(enable?'Adapter <b>enabled</b> — several can be active at once.':'Adapter disabled.');loadRouting();
+  }catch(_){toast('Could not toggle the adapter.');}
+}
 function applyThemeGlyph(){var b=document.getElementById('themeBtn');if(b)b.textContent=document.documentElement.getAttribute('data-theme')==='light'?'☀':'☾';}
 function toggleTheme(){var next=document.documentElement.getAttribute('data-theme')==='light'?'dark':'light';document.documentElement.setAttribute('data-theme',next);try{localStorage.setItem('cp-theme',next);}catch(e){}applyThemeGlyph();}
-tick();pend();loadAdapters();loadRouting();applyThemeGlyph();setInterval(()=>{tick();pend();loadAdapters();loadRouting();},2000);
+
+// ── automations: view + (token-gated) control ───────────────────────────────────────────────────
+function tokenVal(){try{return localStorage.getItem('cp-optoken')||'';}catch(e){return '';}}
+function saveToken(){var v=document.getElementById('optoken').value;try{localStorage.setItem('cp-optoken',v);}catch(e){}paintTokHint(v);}
+function paintTokHint(v){var h=document.getElementById('tokhint');if(!h)return;h.className=v?'ok':'hint';
+  h.textContent=v?'token set — controls enabled in this browser only':'controls (approve / pause / run) need the registry token — view is open';}
+function initToken(){var i=document.getElementById('optoken');if(i){i.value=tokenVal();paintTokHint(tokenVal());}}
+function authHeaders(){var t=tokenVal();var h={'Content-Type':'application/json'};if(t)h['Authorization']='Bearer '+t;return h;}
+function trigSummary(t){if(!t)return '—';if(t.type==='manual')return 'manual';
+  if(t.type==='schedule')return t.cron?('cron '+t.cron):('every '+t.interval_seconds+'s');
+  if(t.type==='event')return 'on '+(t.on_verb||'?')+' → '+(t.on_event||'executed');return t.type;}
+function abtn(label,cls,onclick){return `<button class="btn tiny ${cls}" onclick="event.stopPropagation();${onclick}">${label}</button>`;}
+
+async function loadAutomations(){
+ try{
+  const r=await fetch('/api/automations');const {automations}=await r.json();
+  const wrap=document.getElementById('autoWrap'),box=document.getElementById('automations');
+  document.getElementById('autocount').textContent=automations.length;
+  wrap.style.display=automations.length?'block':'none';
+  box.innerHTML=automations.map(a=>{
+   const nm=(a.name&&(a.name.en||a.name.ar))||a.automation_id;
+   const ps=a.plan_summary||{};
+   const shape=a.kind==='composed'?((ps.stages||0)+' stages · '+((ps.adapters||[]).join(', ')||'—')):((ps.nodes||0)+' steps');
+   const st=a.state,rid=esc(a.workspace)+'-'+esc(a.automation_id);
+   const acts=[];
+   if(st==='pending_approval')acts.push(abtn('✓ Approve','ok',`autoState('${a.workspace}','${a.automation_id}',${a.version},'active')`));
+   if(st==='active'){acts.push(abtn('⏸ Pause','ghost',`autoState('${a.workspace}','${a.automation_id}',${a.version},'paused')`));
+     acts.push(abtn('▶ Run now','',`autoRun('${a.workspace}','${a.automation_id}')`));}
+   if(st==='paused')acts.push(abtn('▶ Resume','ok',`autoState('${a.workspace}','${a.automation_id}',${a.version},'active')`));
+   acts.push(abtn('↻ Runs','ghost',`toggleRuns('${a.workspace}','${a.automation_id}')`));
+   return `<div class="autocard s-${esc(st)}">
+     <div class=top><span class=nm>${esc(nm)}</span><span class="sbadge s-${esc(st)}">${esc(st)}</span></div>
+     <div class=meta><span class=kind>${esc(a.kind)}</span><span class=trig>${esc(trigSummary(a.trigger))}</span>
+       <span>v${a.version}</span><span>${esc(a.workspace)}</span><span>${esc(shape)}</span></div>
+     <div class=sub>${esc((a.content_hash||'').slice(0,12))}…${a.approved_by?(' · approved by '+esc(a.approved_by)):''}</div>
+     <div class=acts>${acts.join('')}</div>
+     <div class=runs id="runs-${rid}"></div>
+   </div>`;
+  }).join('');
+ }catch(_){}
+}
+async function autoState(ws,id,ver,state){
+  if(!tokenVal())return toast('Enter the <b>operator token</b> above to control automations.');
+  try{const r=await fetch(`/automations/${ws}/${id}/${ver}/state`,{method:'POST',headers:authHeaders(),body:JSON.stringify({state,approved_by:'operator'})});
+    if(r.status===401)return toast('Operator token rejected.');
+    toast(state==='active'?'Armed — the automation is now <b>active</b>.':state==='paused'?'Paused.':'Updated.');loadAutomations();
+  }catch(_){toast('Could not update the automation.');}
+}
+async function autoRun(ws,id){
+  if(!tokenVal())return toast('Enter the <b>operator token</b> above to run automations.');
+  try{const r=await fetch(`/automations/${ws}/${id}/run`,{method:'POST',headers:authHeaders(),body:JSON.stringify({idempotency_key:'ui-'+Date.now()})});
+    if(r.status===401)return toast('Operator token rejected.');const d=await r.json();
+    toast(d.run?('Run <b>'+(d.run.state||'started')+'</b>.'):'Fired.');loadAutomations();openRuns(ws,id);
+  }catch(_){toast('Could not run the automation.');}
+}
+function toggleRuns(ws,id){const el=document.getElementById('runs-'+ws+'-'+id);if(!el)return;
+  if(el.classList.contains('open')){el.classList.remove('open');el.innerHTML='';}else openRuns(ws,id);}
+async function openRuns(ws,id){
+  const el=document.getElementById('runs-'+ws+'-'+id);if(!el)return;
+  el.classList.add('open');el.innerHTML='<div class=runrow style=color:var(--faint)>loading…</div>';
+  try{const r=await fetch(`/automations/${ws}/${id}/runs?limit=8`);const {runs}=await r.json();
+    el.innerHTML=runs.length?runs.map(x=>`<div class=runrow><span class="rst ${esc(x.state)}">${esc(x.state)}</span>
+      <span>${esc((x.fired_by||'').slice(0,20))}</span><span style=color:var(--faint)>${hhmmss(x.started_at)}</span></div>`).join('')
+      :'<div class=runrow style=color:var(--faint)>no runs yet</div>';
+  }catch(_){el.innerHTML='<div class=runrow>could not load runs</div>';}
+}
+
+// ── compose form: build a two-system automation in one click ────────────────────────────────────
+let cfWs='';
+function val(id){var e=document.getElementById(id);return e?e.value.trim():'';}
+function toggleCompose(){const f=document.getElementById('composeForm');if(!f)return;
+  if(f.style.display==='none'){f.style.display='block';populateCompose();}else f.style.display='none';}
+async function populateCompose(){
+  try{const d=await(await fetch('/api/registry')).json();cfWs=d.workspace||'';const ads=d.adapters||[];
+   const opts='<option value="">— select adapter —</option>'+ads.map(a=>`<option value="${esc(a.adapter_id)}">${esc(a.label||a.adapter_id)}${a.system?(' ('+esc(a.system)+')'):''}</option>`).join('');
+   ['cf_a1','cf_a2'].forEach(id=>{const s=document.getElementById(id);if(s)s.innerHTML=opts;});
+   ['cf_v1','cf_v2'].forEach(id=>{const s=document.getElementById(id);if(s)s.innerHTML='<option value="">— pick adapter first —</option>';});
+  }catch(_){}
+}
+async function loadVerbs(vsel,adapter){
+  const s=document.getElementById(vsel);if(!s)return;
+  if(!adapter){s.innerHTML='<option value="">— pick adapter first —</option>';return;}
+  if(!tokenVal()){s.innerHTML='<option value="">operator token required</option>';return;}
+  s.innerHTML='<option>loading…</option>';
+  try{const r=await fetch(`/api/adapter-skeleton?workspace=${encodeURIComponent(cfWs)}&adapter_id=${encodeURIComponent(adapter)}`,{headers:authHeaders()});
+    if(r.status===401){s.innerHTML='<option value="">token rejected</option>';return;}
+    if(!r.ok){s.innerHTML='<option value="">adapter unreachable</option>';return;}
+    const d=await r.json();const vs=d.verbs||[];
+    s.innerHTML=vs.length?('<option value="">— select verb —</option>'+vs.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('')):'<option value="">no verbs</option>';
+  }catch(_){s.innerHTML='<option value="">error</option>';}
+}
+async function submitCompose(){
+  if(!tokenVal())return toast('Enter the <b>operator token</b> above first.');
+  const id=val('cf_id'),nm=val('cf_name')||id,a1=val('cf_a1'),v1=val('cf_v1'),a2=val('cf_a2'),v2=val('cf_v2');
+  if(!id||!a1||!v1||!a2||!v2)return toast('Need id + both adapters + both verbs.');
+  let ar1={},ar2={};
+  try{ar1=val('cf_args1')?JSON.parse(val('cf_args1')):{};ar2=val('cf_args2')?JSON.parse(val('cf_args2')):{};}
+  catch(e){return toast('Args must be valid JSON.');}
+  const stage=(n,ad,vb,ar)=>({name:n,adapter:ad,plan:{wosool:"0.1",workspace:cfWs,entry:"step_1",
+    pipeline:[{id:"step_1",type:"action",skill:vb.split('.')[0],verb:vb,args:ar}]}});
+  const s2=stage('stage_2',a2,v2,ar2);const hk=val('cf_hk'),hr=val('cf_hr');if(hk&&hr)s2.input_from={[hk]:hr};
+  const body={automation_id:id,name:{en:nm,ar:nm},trigger:{type:"manual"},
+    composed:{workspace:cfWs,stages:[stage('stage_1',a1,v1,ar1),s2]}};
+  try{const r=await fetch('/automations/compose/register',{method:'POST',headers:authHeaders(),body:JSON.stringify(body)});
+    if(r.status===401)return toast('Operator token rejected.');
+    const d=await r.json();
+    if(!d.ok){const why=(d.report&&d.report.stages||[]).flatMap(s=>(s.diagnostics||[]).map(x=>x.code)).join(', ')||(d.report&&d.report.errors||[]).join(', ')||d.error||'refused';
+      return toast('Refused: '+esc(why));}
+    toast('Cross-system automation <b>registered</b> — pending approval.');toggleCompose();loadAutomations();
+  }catch(_){toast('Could not create the automation.');}
+}
+
+initToken();tick();pend();loadAdapters();loadRouting();loadAutomations();applyThemeGlyph();
+setInterval(()=>{tick();pend();loadAdapters();loadRouting();loadAutomations();},2000);
 </script></body></html>"""
 
 
