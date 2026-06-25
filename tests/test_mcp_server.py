@@ -61,6 +61,37 @@ def test_build_asgi_app_returns_callable_even_if_adapter_unreachable() -> None:
     assert callable(app)
 
 
+def test_build_server_honors_allowed_hosts() -> None:
+    # FastMCP only reads `transport_security` as a constructor kwarg and otherwise auto-enables a
+    # localhost-only allowlist — so a server reachable by its container/service name (e.g. another
+    # in-cluster agent connecting to `nilscript-mcp:8765`) needs the deploy to widen the allowlist.
+    server = build_server(_tools(), allowed_hosts=["nilscript-mcp:8765", "mcp.wosool.ai"])
+    ts = server.settings.transport_security
+    assert ts is not None
+    assert ts.enable_dns_rebinding_protection is True
+    assert "nilscript-mcp:8765" in ts.allowed_hosts
+    assert "mcp.wosool.ai" in ts.allowed_hosts
+
+
+def test_build_asgi_app_reads_allowed_hosts_from_env(monkeypatch) -> None:
+    # The deploy sets NIL_MCP_ALLOWED_HOSTS; build_asgi_app must thread it to the FastMCP server so
+    # the DNS-rebinding guard admits the in-cluster + public hosts. Accepts JSON or comma-separated.
+    monkeypatch.setenv("NIL_MCP_ALLOWED_HOSTS", '["nilscript-mcp:*","mcp.wosool.ai"]')
+    captured: dict = {}
+    import nilscript.mcp.server as srv
+
+    real_build_server = srv.build_server
+
+    def _spy(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["allowed_hosts"] = kwargs.get("allowed_hosts")
+        return real_build_server(*args, **kwargs)
+
+    monkeypatch.setattr(srv, "build_server", _spy)
+    app = build_asgi_app(adapter_url="http://127.0.0.1:9", bearer="")
+    assert callable(app)
+    assert captured["allowed_hosts"] == ["nilscript-mcp:*", "mcp.wosool.ai"]
+
+
 def test_remote_auth_gate_protects_mcp_but_not_healthz() -> None:
     # sync test: build_asgi_app calls asyncio.run() internally (discovery), so it can't run inside
     # an active event loop — we drive the httpx assertions via a nested asyncio.run.

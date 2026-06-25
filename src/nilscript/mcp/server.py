@@ -15,6 +15,7 @@ nilscript.org). `build_asgi_app()` returns an ASGI app for production servers (u
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 # Imported at module scope (not lazily) so the wrapped tool functions' stringized annotations
@@ -139,6 +140,7 @@ def build_server(
     port: int = 8765,
     tools_provider: ToolsProvider | None = None,
     automation_tools: Any = None,
+    allowed_hosts: list[str] | None = None,
 ):  # type: ignore[no-untyped-def]
     """Bind the NilTools surface onto a FastMCP server. Imports `mcp` lazily.
 
@@ -149,8 +151,25 @@ def build_server(
     skill/skeleton resources and any `dynamic_verbs` always reflect the `tools` backend (the default).
     `automation_tools` (optional `AutomationTools`) adds the registry tools so an agent can author
     governed automations by talking — bound only when a control-plane registry is configured.
+    `allowed_hosts` (optional) widens the streamable-HTTP DNS-rebinding guard: FastMCP only reads
+    `transport_security` as a constructor kwarg and otherwise auto-enables a localhost-only allowlist,
+    so a server reachable by its container/service or public host (e.g. another in-cluster agent
+    dialing `nilscript-mcp:8765`) is 421-rejected unless those hosts are listed here. Entries may use
+    the SDK's ``host:*`` wildcard-port form. The `/mcp` front door stays bearer-gated regardless.
     """
-    server = FastMCP(name, instructions=_INSTRUCTIONS, host=host, port=port)
+    transport_security = None
+    if allowed_hosts:
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=list(allowed_hosts),
+            allowed_origins=["*"],
+        )
+    server = FastMCP(
+        name, instructions=_INSTRUCTIONS, host=host, port=port,
+        transport_security=transport_security,
+    )
 
     provider = tools_provider if tools_provider is not None else SingletonToolsProvider(tools)
     _register_tools(server, provider)
@@ -411,6 +430,24 @@ def serve(
     uvicorn.run(app, host=host, port=port)
 
 
+def _allowed_hosts_from_env() -> list[str] | None:
+    """Parse ``NIL_MCP_ALLOWED_HOSTS`` (JSON list or comma-separated) for the DNS-rebinding allowlist.
+
+    Set by the deploy when the server is reached by a name other than localhost (its container/service
+    name, or a public ``mcp.*`` host behind a reverse proxy). ``None`` (unset/blank) keeps FastMCP's
+    localhost-only default. Entries may use the SDK's ``host:*`` wildcard-port form.
+    """
+    raw = os.environ.get("NIL_MCP_ALLOWED_HOSTS", "").strip()
+    if not raw:
+        return None
+    if raw.startswith("["):
+        hosts = [str(h).strip() for h in json.loads(raw)]
+    else:
+        hosts = [h.strip() for h in raw.split(",")]
+    hosts = [h for h in hosts if h]
+    return hosts or None
+
+
 def build_asgi_app(
     *,
     adapter_url: str,
@@ -464,6 +501,7 @@ def build_asgi_app(
     server = build_server(
         tools, dynamic_verbs=verbs, tools_provider=provider,
         automation_tools=AutomationTools.from_env(),
+        allowed_hosts=_allowed_hosts_from_env(),
     )
     app = server.streamable_http_app()  # MCP mounted at /mcp
 
