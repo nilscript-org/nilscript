@@ -85,6 +85,9 @@ class NilTools:
             self._proposals.setdefault(sid, {})[proposal.id] = {
                 "tier": proposal.tier.value if proposal.tier is not None else None,
                 "verb": proposal.verb,
+                # the human preview (e.g. {"summary": "delete contact AHMED (43)"}) so the owner's
+                # approval screen can show WHAT they're approving, not a bare proposal id.
+                "preview": proposal.preview,
             }
 
     async def describe(self) -> dict[str, Any]:
@@ -179,10 +182,16 @@ class NilTools:
                 "tier": tier,
                 "message": f"gate=human: a {tier} proposal was REJECTED by the owner; not committed",
             }
-        # pending / unknown → register it for approval and hold
+        # pending / unknown → register it for approval and hold. Pass the verb + human preview so the
+        # owner's Decisions screen shows exactly WHAT they're approving (the gate is the only place
+        # that still holds the proposal detail — a held proposal has no ledger event to enrich from).
+        prop = self._proposals.get(sid, {}).get(proposal_id, {})
         try:
             async with httpx.AsyncClient(timeout=5.0) as c:
-                await c.post(f"{base}/proposals/{proposal_id}/await")
+                await c.post(
+                    f"{base}/proposals/{proposal_id}/await",
+                    json={"verb": prop.get("verb"), "tier": tier, "preview": prop.get("preview")},
+                )
         except httpx.HTTPError:
             pass
         return self._approval_required(tier)

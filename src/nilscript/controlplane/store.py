@@ -426,8 +426,15 @@ class EventStore:
             preview = None
         return {"verb": row["verb"], "tier": row["tier"], "preview": preview}
 
-    def await_approval(self, proposal_id: str) -> dict[str, Any]:
-        """Register a proposal as awaiting human approval (idempotent — keeps an existing decision)."""
+    def await_approval(
+        self, proposal_id: str, *, verb: str | None = None, tier: str | None = None,
+        preview: Any = None,
+    ) -> dict[str, Any]:
+        """Register a proposal as awaiting human approval (idempotent — keeps an existing decision).
+
+        `verb`/`tier`/`preview` are passed by the gate at hold-time (a held proposal has no ledger
+        event yet, so `_enrich` finds nothing). They win over enrichment; `preview` (a dict) is stored
+        as JSON so the owner's Decisions screen can show exactly what the proposal does."""
         with self._lock:
             existing = self._conn.execute(
                 "SELECT status FROM approvals WHERE proposal_id = ?", (proposal_id,)
@@ -435,10 +442,14 @@ class EventStore:
             if existing is not None:
                 return {"proposal_id": proposal_id, "status": existing["status"]}
             meta = self._enrich(proposal_id)
+            preview_str = (
+                json.dumps(preview) if isinstance(preview, (dict, list))
+                else (preview if preview is not None else meta["preview"])
+            )
             self._conn.execute(
                 "INSERT INTO approvals (proposal_id, status, verb, tier, preview, created_at) "
                 "VALUES (?, 'pending', ?, ?, ?, ?)",
-                (proposal_id, meta["verb"], meta["tier"], meta["preview"], _now()),
+                (proposal_id, verb or meta["verb"], tier or meta["tier"], preview_str, _now()),
             )
             self._conn.commit()
         return {"proposal_id": proposal_id, "status": "pending"}
@@ -530,6 +541,26 @@ class EventStore:
                 f"SELECT {_ADAPTER_COLS} FROM adapters WHERE workspace = ? AND active = 1 "
                 "ORDER BY updated_at DESC LIMIT 1",
                 (workspace,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def any_active_adapter(self) -> dict[str, Any] | None:
+        """The single most-recently-active adapter across the whole registry (WITH bearer). Used by the
+        approval executor: in a single-workspace deployment the held proposal was proposed on whatever
+        backend is active, so committing the approved proposal there is correct."""
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {_ADAPTER_COLS} FROM adapters WHERE active = 1 ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def approval(self, proposal_id: str) -> dict[str, Any] | None:
+        """The full approval row (verb/tier/preview/status) — the executor reads the verb to scope the
+        control-plane grant when it commits the approved proposal."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT proposal_id, status, verb, tier, preview FROM approvals WHERE proposal_id = ?",
+                (proposal_id,),
             ).fetchone()
         return dict(row) if row is not None else None
 

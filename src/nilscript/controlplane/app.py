@@ -41,6 +41,7 @@ from nilscript.controlplane.store import EventStore
 from nilscript.kernel.diagnostics import ValidationResult
 from nilscript.kernel.executor import LocalExecutor
 from nilscript.sdk.client import NilClient
+from nilscript.sdk.idempotency import commit_idempotency_key
 from nilscript.sdk.connect import handshake
 from nilscript.sdk.grants import GrantRef
 from nilscript.sdk.transport import NilTransport
@@ -236,18 +237,56 @@ def create_app(
 
     # ── human-approval gate (Phase 2) ────────────────────────────────────────────────────────
     @app.post("/proposals/{proposal_id}/await")
-    def await_approval(proposal_id: str) -> dict[str, Any]:
-        """Called by the gate when it holds a proposal for owner approval."""
-        return store.await_approval(proposal_id)
+    async def await_approval(proposal_id: str, request: Request) -> dict[str, Any]:
+        """Called by the gate when it holds a proposal for owner approval. The gate passes the verb +
+        human preview (a held proposal has no ledger event to enrich from) so the Decisions screen
+        shows WHAT is being approved."""
+        body: dict[str, Any] = {}
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            body = {}
+        return store.await_approval(
+            proposal_id, verb=body.get("verb"), tier=body.get("tier"), preview=body.get("preview"),
+        )
 
     @app.get("/proposals/{proposal_id}/decision")
     def get_decision(proposal_id: str) -> dict[str, Any]:
         """Polled by the gate before it commits a held proposal."""
         return {"proposal_id": proposal_id, "status": store.decision(proposal_id)}
 
+    async def _execute_approved(proposal_id: str) -> dict[str, Any]:
+        """The owner approved a HELD proposal → the CONTROL PLANE commits it against the active adapter.
+        This is the SSOT keystone: approval DRIVES execution (the agent never re-commits), so an approve
+        click actually performs the deletion/effect. Reuses the `_live_runner` client pattern; the
+        proposal detail (verb) rides on the approval row (threaded at hold-time), so no MCP memory is
+        needed — survives MCP restarts. Honest on failure (expired / already committed / unreachable)."""
+        appr = store.approval(proposal_id) or {}
+        active = store.any_active_adapter()
+        if not active or not active.get("url"):
+            return {"executed": False, "error": "no active adapter to commit against"}
+        ws = active.get("workspace", "") or ""
+        verb = appr.get("verb")
+        bearer = active.get("bearer", "") or ""
+        transport = NilTransport(base_url=active["url"], bearer_secret=bearer)
+        grant = GrantRef.from_secret(
+            grant_id="control-plane-approval", workspace=ws, secret=bearer or "cp",
+            scopes=frozenset({verb}) if verb else frozenset(),
+        )
+        client = NilClient(transport=transport, grant=grant)
+        try:
+            key = commit_idempotency_key(f"cp-approve:{proposal_id}", proposal_id)
+            outcome = await client.commit(proposal_id, idempotency_key=key)
+            return {"executed": True, "outcome": outcome.model_dump(mode="json", exclude_none=True)}
+        except Exception as exc:  # noqa: BLE001 — adapter unreachable / proposal expired / already done
+            return {"executed": False, "error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            await transport.aclose()
+
     @app.post("/proposals/{proposal_id}/decision")
     async def post_decision(proposal_id: str, request: Request) -> Any:
-        """Owner approves/rejects from the UI."""
+        """Owner approves/rejects from the UI. On APPROVE the control plane immediately executes the
+        held proposal against the active adapter (the approval drives the effect)."""
         body = {}
         try:
             body = await request.json()
@@ -257,7 +296,10 @@ def create_app(
         if status not in ("approved", "rejected"):
             return JSONResponse({"error": "status must be 'approved' or 'rejected'"}, status_code=400)
         ok = store.decide(proposal_id, status, actor=body.get("actor", "owner"), reason=body.get("reason", ""))
-        return {"ok": ok, "proposal_id": proposal_id, "status": store.decision(proposal_id)}
+        result: dict[str, Any] = {"ok": ok, "proposal_id": proposal_id, "status": store.decision(proposal_id)}
+        if ok and status == "approved":
+            result["execution"] = await _execute_approved(proposal_id)
+        return result
 
     @app.get("/api/pending")
     def pending() -> dict[str, Any]:
