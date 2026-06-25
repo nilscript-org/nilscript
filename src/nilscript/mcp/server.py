@@ -140,6 +140,7 @@ def build_server(
     port: int = 8765,
     tools_provider: ToolsProvider | None = None,
     automation_tools: Any = None,
+    brain_tools: Any = None,
     allowed_hosts: list[str] | None = None,
 ):  # type: ignore[no-untyped-def]
     """Bind the NilTools surface onto a FastMCP server. Imports `mcp` lazily.
@@ -180,6 +181,8 @@ def build_server(
     _register_skill(server, tools)
     if automation_tools is not None:
         _register_automation_tools(server, automation_tools)
+    if brain_tools is not None:
+        _register_brain_tools(server, brain_tools)
     return server
 
 
@@ -242,6 +245,55 @@ def _register_automation_tools(server: Any, auto: Any) -> None:
     server.add_tool(
         nil_automation_list, name="nil_automation_list",
         description="List a workspace's registered automations (latest version of each). No side effect.",
+    )
+
+
+def _register_brain_tools(server: Any, brain: Any) -> None:
+    """Bind the read-only Business Graph tools. These answer "show my policies / cycles / what changed /
+    what's overdue" deterministically from the brain read-model — so the agent never improvises (curl,
+    file search) or mistakes a graph question for a missing kernel verb. All read-only, no side effect."""
+
+    async def nil_graph(kind: str | None = None, tenant: str | None = None) -> dict[str, Any]:
+        return await brain.graph(kind, tenant)
+
+    async def nil_cycles(tenant: str | None = None) -> dict[str, Any]:
+        return await brain.cycles(tenant)
+
+    async def nil_overview(tenant: str | None = None) -> dict[str, Any]:
+        return await brain.overview(tenant)
+
+    async def nil_instances(tenant: str | None = None) -> dict[str, Any]:
+        return await brain.instances(tenant)
+
+    async def nil_activity(tenant: str | None = None) -> dict[str, Any]:
+        return await brain.activity(tenant)
+
+    server.add_tool(
+        nil_graph, name="nil_graph",
+        description="READ the Business Graph nodes from the brain. Pass kind to filter: 'policy' (the "
+        "right way to answer 'show my policies' — policies are graph nodes, NOT kernel verbs), 'entity', "
+        "'role', 'flow', or 'cycle'. No side effect. Use this for any 'show me my X' structure question.",
+    )
+    server.add_tool(
+        nil_cycles, name="nil_cycles",
+        description="READ the business cycles (e.g. Sales, Finance) with each cycle's goal, metrics, and "
+        "members. The deterministic answer to 'show me the cycles'. No side effect.",
+    )
+    server.add_tool(
+        nil_overview, name="nil_overview",
+        description="READ a one-glance graph summary: counts of entities, roles, policies, flows, and "
+        "cycles for the workspace. No side effect.",
+    )
+    server.add_tool(
+        nil_instances, name="nil_instances",
+        description="READ live instance tallies per entity type — totals plus derived-state counts such "
+        "as overdue and awaiting_approval. The deterministic answer to 'how many invoices are overdue'. "
+        "No side effect.",
+    )
+    server.add_tool(
+        nil_activity, name="nil_activity",
+        description="READ what recently changed in the Business Graph (latest version additions/diff). "
+        "The deterministic answer to 'what changed this week'. No side effect.",
     )
 
 
@@ -497,10 +549,12 @@ def build_asgi_app(
             registry=make_registry_lookup(),
         )
     from nilscript.mcp.automation_tools import AutomationTools
+    from nilscript.mcp.brain_tools import BrainTools
 
     server = build_server(
         tools, dynamic_verbs=verbs, tools_provider=provider,
         automation_tools=AutomationTools.from_env(),
+        brain_tools=BrainTools.from_env(),
         allowed_hosts=_allowed_hosts_from_env(),
     )
     app = server.streamable_http_app()  # MCP mounted at /mcp
