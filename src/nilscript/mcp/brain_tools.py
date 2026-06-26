@@ -69,6 +69,30 @@ class BrainTools:
             if self._client is None:
                 await client.aclose()
 
+    async def _post(self, path: str, *, json: dict[str, Any]) -> Any:
+        client = self._client or httpx.AsyncClient(base_url=self._base, timeout=self._timeout)
+        try:
+            resp = await client.request("POST", path, json=json, headers=self._headers)
+            if resp.status_code >= 400:
+                return {"error": f"brain returned {resp.status_code}", "path": path, "detail": resp.text[:200]}
+            try:
+                return resp.json()
+            except ValueError:
+                return {"error": "non-json response from brain", "status": resp.status_code}
+        except httpx.HTTPError as exc:
+            return {"error": f"brain unreachable: {exc}"}
+        finally:
+            if self._client is None:
+                await client.aclose()
+
+    async def assert_fact(self, event_type: str, facts: dict[str, Any], *, tenant: str | None = None) -> Any:
+        """Assert a business fact to the brain (POST /api/assert) — the brain interprets it via the
+        ontology and executes through the governed kernel path. The write side of a graph intent."""
+        ws = self._tenant_for(tenant)
+        if not ws:
+            return {"error": "no tenant configured (set NIL_BRAIN_TENANT or pass tenant)"}
+        return await self._post("/api/assert", json={"tenant": ws, "event_type": event_type, "facts": facts})
+
     # ── read tools ──────────────────────────────────────────────────────────────────────────────
 
     async def graph(self, kind: str | None = None, tenant: str | None = None) -> dict[str, Any]:

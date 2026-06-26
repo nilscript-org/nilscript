@@ -49,12 +49,17 @@ class _Fake:
         return next((r for r in self.rows if r["id"] == record_id), None)
 
     def aggregate(self, target, *, predicates, group_by, metrics):
-        return None
+        buckets: dict = {}
+        for r in self.rows:
+            if self._match(r, predicates):
+                buckets[r.get(group_by)] = buckets.get(r.get(group_by), 0) + 1
+        return [{"key": k, "count": v} for k, v in buckets.items()]
 
 
 def _contacts():
-    rows = [{"id": i, "name": f"Contact {i}", "phone": f"+9745{i:07d}"} for i in range(40)]
-    rows.append({"id": 18, "name": "دينا كمال النجار", "phone": "+97455123456"})
+    rows = [{"id": i, "name": f"Contact {i}", "phone": f"+9745{i:07d}", "country": ("QA" if i % 2 else "SA")}
+            for i in range(40)]
+    rows.append({"id": 18, "name": "دينا كمال النجار", "phone": "+97455123456", "country": "QA"})
     return rows
 
 
@@ -94,3 +99,16 @@ def test_unknown_about_is_a_structured_refusal() -> None:
     out = _resolver().resolve(Intent(about="hr.salary", where=(), seek="count"))
     assert out.kind == "refusal"
     assert out.code  # carries a code the agent can act on
+
+
+def test_seek_summary_groups_via_aggregate() -> None:
+    intent = Intent(about="res.partner", where=(), seek="summary", by="country")
+    out = _resolver().resolve(intent)
+    assert out.kind == "result"
+    by = {g["key"]: g["count"] for g in out.value["groups"]}
+    assert by == {"SA": 20, "QA": 21}
+
+
+def test_seek_summary_without_a_dimension_is_a_refusal() -> None:
+    out = _resolver().resolve(Intent(about="res.partner", where=(), seek="summary"))
+    assert out.kind == "refusal" and out.code == "MISSING_DIMENSION"
