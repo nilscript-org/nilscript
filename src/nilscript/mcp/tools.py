@@ -25,7 +25,16 @@ from typing import Any
 
 import httpx
 
-from nilscript.dataplane import OP_TO_RESOURCE, ResultTooLarge, enforce_byte_cap
+from nilscript.dataplane import (
+    OP_TO_RESOURCE,
+    Binding,
+    Change,
+    Intent,
+    IntentRouter,
+    Outcome,
+    ResultTooLarge,
+    enforce_byte_cap,
+)
 from nilscript.sdk.client import NilClient
 from nilscript.sdk.connect import handshake
 from nilscript.sdk.idempotency import commit_idempotency_key
@@ -69,6 +78,7 @@ class NilTools:
         *,
         session_id: str = "mcp-session",
         gate: str = "two-step",
+        brain: Any = None,
     ) -> None:
         if gate not in GATE_MODES:
             raise ValueError(f"gate must be one of {sorted(GATE_MODES)}, got {gate!r}")
@@ -76,6 +86,7 @@ class NilTools:
         self._transport = transport
         self._default_session = session_id
         self._gate = gate
+        self._brain = brain  # optional BrainTools — owns graph/meta entities in nil_intent routing
         self._proposals: dict[str, dict[str, dict[str, Any]]] = {}
 
     def _sid(self, session_id: str | None) -> str:
@@ -169,12 +180,36 @@ class NilTools:
         {op: create|update|remove, set:{...}} (a governed write). The system resolves and executes it
         deterministically — for a read it returns a lean result; for a change it returns a PREVIEW
         (proposal) that the gate/owner commits. You never pick a verb or build a query."""
-        if change:
-            return await self._intent_change(about, where or [], change, session_id=session_id)
-        return await self.query(
-            "nil.intent",
-            {"about": about, "where": where or [], "seek": seek, "limit": limit, "cursor": cursor},
+        intent_obj = Intent(
+            about=about,
+            where=tuple(Binding(attr=b.get("attr"), rel=b.get("rel"), value=b.get("value")) for b in (where or [])),
+            seek=seek,
+            change=Change(op=change.get("op"), set=change.get("set") or {}) if change else None,
+            limit=limit,
+            cursor=cursor,
         )
+        providers: list[Any] = []
+        if self._brain is not None:
+            providers.append(_GraphIntentProvider(self._brain))
+        providers.append(_AdapterIntentProvider(self, session_id))  # fallback: owns business entities
+        outcome = await IntentRouter(providers).resolve(intent_obj)
+        if outcome.kind == "refusal":
+            return {"outcome": "refused", "code": outcome.code, "message": outcome.fix}
+        return outcome.value  # providers return the wire-shaped response dict as the Outcome value
+
+    async def _adapter_resolve(self, intent_obj: Any, session_id: str | None) -> dict[str, Any]:
+        """The adapter execution domain: reads via the adapter's nil.intent verb, writes via the
+        universal generic-CRUD spine (resource.*) — the logic unchanged, now behind a provider."""
+        where = [{"attr": b.attr, "rel": b.rel, "value": b.value} for b in intent_obj.where]
+        if intent_obj.change is not None:
+            return await self._intent_change(
+                intent_obj.about, where, {"op": intent_obj.change.op, "set": intent_obj.change.set},
+                session_id=session_id,
+            )
+        return await self.query("nil.intent", {
+            "about": intent_obj.about, "where": where, "seek": intent_obj.seek,
+            "limit": intent_obj.limit, "cursor": intent_obj.cursor,
+        })
 
     async def _intent_change(
         self, about: str, where: list[dict[str, Any]], change: dict[str, Any], *, session_id: str | None
@@ -310,3 +345,47 @@ class NilTools:
         except httpx.HTTPError:
             pass
         return self._approval_required(tier)
+
+
+# ── intent execution domains (providers behind the single nil_intent surface) ────────────────────
+class _GraphIntentProvider:
+    """The graph/meta domain: ont ology entities (cycles, policies, roles, instances, overview,
+    activity) resolve against the Business Graph (brain). A structural `about` set — not keywords."""
+
+    _READS = {"cycle", "cycles", "overview", "instance", "instances", "activity",
+              "policy", "role", "entity", "node", "graph"}
+
+    def __init__(self, brain: Any) -> None:
+        self._brain = brain
+
+    def owns(self, about: str) -> bool:
+        return about in self._READS
+
+    async def resolve(self, intent: Any) -> Outcome:
+        a = intent.about
+        if a in ("cycle", "cycles"):
+            data = await self._brain.cycles()
+        elif a == "overview":
+            data = await self._brain.overview()
+        elif a in ("instance", "instances"):
+            data = await self._brain.instances()
+        elif a == "activity":
+            data = await self._brain.activity()
+        else:  # policy / role / entity / node / graph → the graph nodes (kind-filtered where natural)
+            data = await self._brain.graph(kind=a if a in ("policy", "role") else None)
+        return Outcome.result(data)
+
+
+class _AdapterIntentProvider:
+    """The business domain: anything not claimed by a more specific provider resolves against the active
+    adapter (reads via nil.intent, writes via the governed resource.* spine). The catch-all fallback."""
+
+    def __init__(self, tools: "NilTools", session_id: str | None) -> None:
+        self._tools = tools
+        self._session_id = session_id
+
+    def owns(self, about: str) -> bool:
+        return True
+
+    async def resolve(self, intent: Any) -> Outcome:
+        return Outcome.result(await self._tools._adapter_resolve(intent, self._session_id))

@@ -319,3 +319,33 @@ async def test_intent_change_update_no_match_is_refusal() -> None:
     out = await tools.intent("res.partner", where=[{"attr": "name", "rel": "contains", "value": "زز"}],
                              change={"op": "update", "set": {"phone": "+9"}})
     assert out["outcome"] == "refused" and out["code"] == "NO_MATCH"
+
+
+class _FakeBrain:
+    async def cycles(self): return {"cycles": ["sales", "finance"]}
+    async def overview(self): return {"overview": True}
+    async def instances(self): return {"instances": []}
+    async def activity(self): return {"activity": []}
+    async def graph(self, kind=None): return {"nodes": [], "kind": kind}
+
+
+async def test_intent_routes_graph_entity_to_the_brain() -> None:
+    transport = NilTransport(base_url=BASE, bearer_secret=GRANT.bearer_secret())
+    client = NilClient(transport=transport, grant=GRANT)
+    tools = NilTools(client, transport, session_id=SESSION, brain=_FakeBrain())
+    out = await tools.intent("cycle", seek="all")            # graph entity → brain, no adapter call
+    assert out == {"cycles": ["sales", "finance"]}
+    out2 = await tools.intent("policy", seek="all")          # policy → graph nodes, kind-filtered
+    assert out2["kind"] == "policy"
+
+
+@respx.mock
+async def test_intent_routes_business_entity_to_the_adapter_even_with_brain() -> None:
+    respx.post(f"{BASE}/nil/v0.1/query").mock(
+        return_value=httpx.Response(200, json={"data": {"outcome": "result", "value": {"items": [{"id": 18}]}}})
+    )
+    transport = NilTransport(base_url=BASE, bearer_secret=GRANT.bearer_secret())
+    client = NilClient(transport=transport, grant=GRANT)
+    tools = NilTools(client, transport, session_id=SESSION, brain=_FakeBrain())
+    out = await tools.intent("res.partner", where=[{"attr": "name", "rel": "contains", "value": "دينا"}], seek="the")
+    assert out["value"]["items"] == [{"id": 18}]   # routed to the adapter, not the brain

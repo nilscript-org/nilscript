@@ -142,6 +142,7 @@ from .export import (  # noqa: E402
     NotAuthorizedHandle,
 )
 from .bulk import BulkResult, run_bulk  # noqa: E402
+from .router import IntentProvider, IntentRouter  # noqa: E402
 from .intent import (  # noqa: E402
     OP_TO_RESOURCE,
     REL_TO_OP,
@@ -165,7 +166,9 @@ __all__ = [
     "OP_TO_RESOURCE",
     "IdentityResolver",
     "Intent",
+    "IntentProvider",
     "IntentResolver",
+    "IntentRouter",
     "Outcome",
     "BulkResult",
     "EDGE_FILTER_BOUND",

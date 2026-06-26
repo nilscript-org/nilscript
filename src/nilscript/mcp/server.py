@@ -52,10 +52,12 @@ def build_tools(
     scopes: frozenset[str] | None = None,
     session_id: str = "mcp-session",
     gate: str = "two-step",
+    brain: Any = None,
 ) -> NilTools:
     """Wire the SDK client to the adapter and wrap it in the MCP tool surface.
 
-    Mirrors `cli._cmd_run` so local-run and MCP behave identically against the same shim.
+    Mirrors `cli._cmd_run` so local-run and MCP behave identically against the same shim. `brain` (a
+    BrainTools, optional) is the graph/meta execution domain behind nil_intent's router.
     """
     grant = GrantRef.from_secret(
         grant_id=grant_id,
@@ -65,7 +67,7 @@ def build_tools(
     )
     transport = NilTransport(base_url=adapter_url, bearer_secret=bearer)
     client = NilClient(transport=transport, grant=grant)
-    return NilTools(client, transport, session_id=session_id, gate=gate)
+    return NilTools(client, transport, session_id=session_id, gate=gate, brain=brain)
 
 
 class ToolsProvider:
@@ -364,8 +366,12 @@ def _register_tools(server: Any, provider: ToolsProvider) -> None:
         "res.partner), where ([{attr, rel, value}] with rel ∈ is|contains|gt|gte|lt|lte|between|in), and "
         "either seek (the|all|count|summary, a read) OR change ({op:create|update|remove, set:{...}}, a "
         "governed write). Reads return a lean result; a change returns a PREVIEW the gate/owner commits. "
-        "You NEVER pick a verb, build a filter, or list to scan. "
+        "You NEVER pick a verb, build a filter, or list to scan. `about` spans BOTH business entities "
+        "(res.partner, crm.lead — routed to the backend) AND the Business Graph (policy, cycle, role, "
+        "instance, overview, activity — routed to the brain). This is the ONE tool for reading and "
+        "changing anything in the system. "
         "Find دينا → about='res.partner', where=[{attr:'name',rel:'contains',value:'دينا'}], seek='the'. "
+        "Show policies → about='policy', seek='all'. Show business cycles → about='cycle', seek='all'. "
         "Update her phone → about='res.partner', where=[{attr:'name',rel:'contains',value:'دينا'}], change={op:'update', set:{phone:'…'}}.",
     )
     server.add_tool(
@@ -586,9 +592,12 @@ def build_asgi_app(
     verbs: list[str] = []
     if dynamic_tools and not multi_tenant:
         verbs = asyncio.run(_discover_verbs(adapter_url, bearer))
+    from nilscript.mcp.brain_tools import BrainTools
+
+    brain = BrainTools.from_env()  # graph/meta domain behind nil_intent (None if NIL_BRAIN_URL unset)
     tools = build_tools(
         adapter_url=adapter_url, grant_id=grant_id, workspace=workspace,
-        bearer=bearer, scopes=scopes, gate=gate,
+        bearer=bearer, scopes=scopes, gate=gate, brain=brain,
     )
     provider: ToolsProvider | None = None
     if multi_tenant:
@@ -603,12 +612,11 @@ def build_asgi_app(
             registry=make_registry_lookup(),
         )
     from nilscript.mcp.automation_tools import AutomationTools
-    from nilscript.mcp.brain_tools import BrainTools
 
     server = build_server(
         tools, dynamic_verbs=verbs, tools_provider=provider,
         automation_tools=AutomationTools.from_env(),
-        brain_tools=BrainTools.from_env(),
+        brain_tools=brain,
         allowed_hosts=_allowed_hosts_from_env(),
     )
     app = server.streamable_http_app()  # MCP mounted at /mcp
