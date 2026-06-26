@@ -604,7 +604,10 @@ def build_asgi_app(
     import asyncio
 
     verbs: list[str] = []
-    if dynamic_tools and not multi_tenant:
+    # Single-surface hides dynamic verbs anyway, so skip the startup adapter describe (an Odoo
+    # fields_get that can take ~minute when the backend is cold) — it was the MCP's slow cold-start,
+    # which is exactly what left a window for Hermes to discover an unready MCP and cache 0 tools.
+    if dynamic_tools and not multi_tenant and not _single_surface():
         verbs = asyncio.run(_discover_verbs(adapter_url, bearer))
     from nilscript.mcp.automation_tools import AutomationTools
     from nilscript.mcp.brain_tools import BrainTools
