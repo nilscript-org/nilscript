@@ -112,3 +112,15 @@ def test_seek_summary_groups_via_aggregate() -> None:
 def test_seek_summary_without_a_dimension_is_a_refusal() -> None:
     out = _resolver().resolve(Intent(about="res.partner", where=(), seek="summary"))
     assert out.kind == "refusal" and out.code == "MISSING_DIMENSION"
+
+
+# ── op=method contract readiness (Odoo full-coverage gap 3) ───────────────────────────────────────
+def test_change_contract_supports_method_op() -> None:
+    """The intent write contract carries `method`/`params` and maps op=method → the adapter's generic
+    resource.method spine, so workflow actions (post/validate/confirm) are expressible through the one
+    nil_intent payload. The execution provider that consumes this is the intent-unification phase."""
+    from nilscript.dataplane import OP_TO_RESOURCE, Change
+
+    assert OP_TO_RESOURCE["method"] == "resource.method"
+    change = Change(op="method", method="button_validate", params={"foo": "bar"})
+    assert change.op == "method" and change.method == "button_validate" and change.params == {"foo": "bar"}
