@@ -53,6 +53,7 @@ def build_tools(
     session_id: str = "mcp-session",
     gate: str = "two-step",
     brain: Any = None,
+    automation: Any = None,
 ) -> NilTools:
     """Wire the SDK client to the adapter and wrap it in the MCP tool surface.
 
@@ -67,7 +68,10 @@ def build_tools(
     )
     transport = NilTransport(base_url=adapter_url, bearer_secret=bearer)
     client = NilClient(transport=transport, grant=grant)
-    return NilTools(client, transport, session_id=session_id, gate=gate, brain=brain)
+    return NilTools(
+        client, transport, session_id=session_id, gate=gate,
+        brain=brain, automation=automation, workspace=workspace,
+    )
 
 
 class ToolsProvider:
@@ -174,16 +178,17 @@ def build_server(
         transport_security=transport_security,
     )
 
+    single = _single_surface()  # nil_intent subsumes reads/graph/automation when on
     provider = tools_provider if tools_provider is not None else SingletonToolsProvider(tools)
-    _register_tools(server, provider)
-    if dynamic_verbs:
+    _register_tools(server, provider, single_surface=single)
+    if dynamic_verbs and not single:
         from nilscript.mcp.dynamic import register_dynamic_tools
 
         register_dynamic_tools(server, tools, dynamic_verbs)
     _register_skill(server, tools)
-    if automation_tools is not None:
+    if automation_tools is not None and not single:
         _register_automation_tools(server, automation_tools)
-    if brain_tools is not None:
+    if brain_tools is not None and not single:
         _register_brain_tools(server, brain_tools)
     return server
 
@@ -299,7 +304,13 @@ def _register_brain_tools(server: Any, brain: Any) -> None:
     )
 
 
-def _register_tools(server: Any, provider: ToolsProvider) -> None:
+def _single_surface() -> bool:
+    """When on, nil_intent is the ONLY model-facing tool (plus describe/commit/status/rollback); the
+    subsumed read/graph/automation tools are hidden. Makes the correct path the only obvious one."""
+    return os.environ.get("NIL_MCP_SINGLE_SURFACE", "") not in ("", "0", "false", "False")
+
+
+def _register_tools(server: Any, provider: ToolsProvider, *, single_surface: bool = False) -> None:
     """Wrap each primitive with the MCP Context so the backend + per-connection session resolve from
     the connection: `provider.get(ctx)` picks the backend (one shared, or per-tenant from headers)
     and `session_key(ctx)` isolates each connection's proposal/idempotency session. `ctx` is injected
@@ -342,23 +353,17 @@ def _register_tools(server: Any, provider: ToolsProvider) -> None:
     async def nil_rollback(compensation_token: str, reason: str, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).rollback(compensation_token, reason, session_id=session_key(ctx))
 
+    # The single-surface keepers: discovery, the one intent payload, and the governance verbs the
+    # approval/reversal flow needs. Everything else is SUBSUMED by nil_intent and hidden when
+    # NIL_MCP_SINGLE_SURFACE is on — so the model sees ONE obvious tool, not a menu.
     server.add_tool(
         nil_describe, name="nil_describe",
         description="Discover the backend skeleton: the verbs and targets it actually exposes. No side effect.",
     )
     server.add_tool(
-        nil_propose, name="nil_propose",
-        description="Preview an intent (verb + args). NO side effect: returns a human-readable preview "
-        "with a reversibility tier, or a structured refusal. Always call this before nil_commit.",
-    )
-    server.add_tool(
         nil_commit, name="nil_commit",
         description="Execute a previously previewed proposal by its id. This is the ONLY tool that writes. "
         "Idempotent: re-committing the same proposal replays, it never double-writes.",
-    )
-    server.add_tool(
-        nil_query, name="nil_query",
-        description="Read live business truth (verb + args). No side effect.",
     )
     server.add_tool(
         nil_intent, name="nil_intent",
@@ -373,6 +378,26 @@ def _register_tools(server: Any, provider: ToolsProvider) -> None:
         "Find دينا → about='res.partner', where=[{attr:'name',rel:'contains',value:'دينا'}], seek='the'. "
         "Show policies → about='policy', seek='all'. Show business cycles → about='cycle', seek='all'. "
         "Update her phone → about='res.partner', where=[{attr:'name',rel:'contains',value:'دينا'}], change={op:'update', set:{phone:'…'}}.",
+    )
+    server.add_tool(
+        nil_status, name="nil_status",
+        description="Get the status/result of a proposal by id, including its compensation handle.",
+    )
+    server.add_tool(
+        nil_rollback, name="nil_rollback",
+        description="Request a governed reversal of a committed effect (compensation_token + reason: "
+        "saga_unwind|owner_cancel|downstream_failed|agent_repair). Previews a compensation to commit, "
+        "or refuses honestly (IRREVERSIBLE / COMPENSATION_EXPIRED). No silent write.",
+    )
+    if single_surface:
+        return  # nil_intent subsumes the rest; hide them so there is ONE obvious tool
+    server.add_tool(
+        nil_propose, name="nil_propose",
+        description="Preview an intent (verb + args). NO side effect: returns a preview + tier, or a refusal.",
+    )
+    server.add_tool(
+        nil_query, name="nil_query",
+        description="Read live business truth (verb + args). No side effect.",
     )
     server.add_tool(
         nil_search, name="nil_search",
@@ -397,18 +422,7 @@ def _register_tools(server: Any, provider: ToolsProvider) -> None:
     server.add_tool(
         nil_export, name="nil_export",
         description="Stream a bulk read to a DATA HANDLE (not rows): open it in your sandbox and use code "
-        "(pandas/sqlite) for analysis over many rows. Bulk extraction is gated+audited "
-        "(BULK_APPROVAL_REQUIRED until approved=true).",
-    )
-    server.add_tool(
-        nil_status, name="nil_status",
-        description="Get the status/result of a proposal by id, including its compensation handle.",
-    )
-    server.add_tool(
-        nil_rollback, name="nil_rollback",
-        description="Request a governed reversal of a committed effect (compensation_token + reason: "
-        "saga_unwind|owner_cancel|downstream_failed|agent_repair). Previews a compensation to commit, "
-        "or refuses honestly (IRREVERSIBLE / COMPENSATION_EXPIRED). No silent write.",
+        "(pandas/sqlite) for analysis over many rows. Bulk extraction is gated+audited.",
     )
 
 
@@ -592,12 +606,14 @@ def build_asgi_app(
     verbs: list[str] = []
     if dynamic_tools and not multi_tenant:
         verbs = asyncio.run(_discover_verbs(adapter_url, bearer))
+    from nilscript.mcp.automation_tools import AutomationTools
     from nilscript.mcp.brain_tools import BrainTools
 
     brain = BrainTools.from_env()  # graph/meta domain behind nil_intent (None if NIL_BRAIN_URL unset)
+    automation = AutomationTools.from_env()  # automation domain behind nil_intent
     tools = build_tools(
         adapter_url=adapter_url, grant_id=grant_id, workspace=workspace,
-        bearer=bearer, scopes=scopes, gate=gate, brain=brain,
+        bearer=bearer, scopes=scopes, gate=gate, brain=brain, automation=automation,
     )
     provider: ToolsProvider | None = None
     if multi_tenant:
@@ -611,11 +627,9 @@ def build_asgi_app(
             default=default, allow_insecure=allow_insecure, gate=gate,
             registry=make_registry_lookup(),
         )
-    from nilscript.mcp.automation_tools import AutomationTools
-
     server = build_server(
         tools, dynamic_verbs=verbs, tools_provider=provider,
-        automation_tools=AutomationTools.from_env(),
+        automation_tools=automation,
         brain_tools=brain,
         allowed_hosts=_allowed_hosts_from_env(),
     )

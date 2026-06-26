@@ -79,6 +79,8 @@ class NilTools:
         session_id: str = "mcp-session",
         gate: str = "two-step",
         brain: Any = None,
+        automation: Any = None,
+        workspace: str = "",
     ) -> None:
         if gate not in GATE_MODES:
             raise ValueError(f"gate must be one of {sorted(GATE_MODES)}, got {gate!r}")
@@ -87,6 +89,8 @@ class NilTools:
         self._default_session = session_id
         self._gate = gate
         self._brain = brain  # optional BrainTools — owns graph/meta entities in nil_intent routing
+        self._automation = automation  # optional AutomationTools — owns about="automation"
+        self._workspace = workspace
         self._proposals: dict[str, dict[str, dict[str, Any]]] = {}
 
     def _sid(self, session_id: str | None) -> str:
@@ -170,6 +174,7 @@ class NilTools:
         where: list[dict[str, Any]] | None = None,
         seek: str = "all",
         change: dict[str, Any] | None = None,
+        by: str | None = None,
         limit: int = 50,
         cursor: str | None = None,
         *,
@@ -184,11 +189,14 @@ class NilTools:
             about=about,
             where=tuple(Binding(attr=b.get("attr"), rel=b.get("rel"), value=b.get("value")) for b in (where or [])),
             seek=seek,
+            by=by,
             change=Change(op=change.get("op"), set=change.get("set") or {}) if change else None,
             limit=limit,
             cursor=cursor,
         )
         providers: list[Any] = []
+        if self._automation is not None:
+            providers.append(_AutomationIntentProvider(self._automation, self._workspace))
         if self._brain is not None:
             providers.append(_GraphIntentProvider(self._brain))
         providers.append(_AdapterIntentProvider(self, session_id))  # fallback: owns business entities
@@ -207,9 +215,27 @@ class NilTools:
                 session_id=session_id,
             )
         return await self.query("nil.intent", {
-            "about": intent_obj.about, "where": where, "seek": intent_obj.seek,
+            "about": intent_obj.about, "where": where, "seek": intent_obj.seek, "by": intent_obj.by,
             "limit": intent_obj.limit, "cursor": intent_obj.cursor,
         })
+
+    async def intent_batch(
+        self, intents: list[dict[str, Any]], *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Run many intents in one call — each resolved independently (partial-allow): one intent's
+        refusal never drops the others. The system executes 100% of what's permitted, structurally."""
+        results: list[dict[str, Any]] = []
+        for spec in intents:
+            try:
+                outcome = await self.intent(
+                    spec.get("about", ""), spec.get("where"), spec.get("seek", "all"),
+                    spec.get("change"), spec.get("by"), int(spec.get("limit") or 50), spec.get("cursor"),
+                    session_id=session_id,
+                )
+            except Exception as exc:  # noqa: BLE001 — isolate a bad intent as its own refusal
+                outcome = {"outcome": "refused", "code": "ERROR", "message": str(exc)}
+            results.append({"about": spec.get("about", ""), "result": outcome})
+        return {"outcome": "batch", "count": len(results), "results": results}
 
     async def _intent_change(
         self, about: str, where: list[dict[str, Any]], change: dict[str, Any], *, session_id: str | None
@@ -363,6 +389,12 @@ class _GraphIntentProvider:
 
     async def resolve(self, intent: Any) -> Outcome:
         a = intent.about
+        if intent.change is not None:  # graph write → assert a fact; the brain interprets + governs
+            facts = dict(intent.change.set or {})
+            for b in intent.where:
+                facts[b.attr] = b.value
+            data = await self._brain.assert_fact(f"{a}.{intent.change.op}", facts)
+            return Outcome.result(data)
         if a in ("cycle", "cycles"):
             data = await self._brain.cycles()
         elif a == "overview":
@@ -389,3 +421,28 @@ class _AdapterIntentProvider:
 
     async def resolve(self, intent: Any) -> Outcome:
         return Outcome.result(await self._tools._adapter_resolve(intent, self._session_id))
+
+
+class _AutomationIntentProvider:
+    """The automation domain: about="automation" resolves against the automation registry — reads list
+    the workspace's automations, a create registers a new one. Same provider contract, no keywords."""
+
+    def __init__(self, automation: Any, workspace: str) -> None:
+        self._a = automation
+        self._ws = workspace
+
+    def owns(self, about: str) -> bool:
+        return about == "automation"
+
+    async def resolve(self, intent: Any) -> Outcome:
+        if intent.change is not None:
+            c = intent.change
+            if c.op != "create":
+                return Outcome.refusal("UNSUPPORTED_OP", f"automation supports create (register); got {c.op!r}")
+            s = c.set or {}
+            data = await self._a.register(
+                s.get("automation_id") or s.get("id", ""), s.get("name") or {},
+                s.get("plan") or {}, s.get("trigger") or {},
+            )
+            return Outcome.result(data)
+        return Outcome.result(await self._a.list(self._ws))

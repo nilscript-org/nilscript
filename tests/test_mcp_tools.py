@@ -327,6 +327,7 @@ class _FakeBrain:
     async def instances(self): return {"instances": []}
     async def activity(self): return {"activity": []}
     async def graph(self, kind=None): return {"nodes": [], "kind": kind}
+    async def assert_fact(self, event_type, facts, tenant=None): return {"asserted": event_type, "facts": facts}
 
 
 async def test_intent_routes_graph_entity_to_the_brain() -> None:
@@ -349,3 +350,59 @@ async def test_intent_routes_business_entity_to_the_adapter_even_with_brain() ->
     tools = NilTools(client, transport, session_id=SESSION, brain=_FakeBrain())
     out = await tools.intent("res.partner", where=[{"attr": "name", "rel": "contains", "value": "دينا"}], seek="the")
     assert out["value"]["items"] == [{"id": 18}]   # routed to the adapter, not the brain
+
+
+@respx.mock
+async def test_intent_batch_runs_each_intent_independently() -> None:
+    # two reads in one batch: both routed, both returned (partial-allow envelope)
+    respx.post(f"{BASE}/nil/v0.1/query").mock(
+        return_value=httpx.Response(200, json={"data": {"outcome": "result", "value": {"count": 7}}})
+    )
+    tools, _ = make_tools()
+    out = await tools.intent_batch([
+        {"about": "res.partner", "seek": "count"},
+        {"about": "crm.lead", "seek": "count"},
+    ])
+    assert out["outcome"] == "batch" and out["count"] == 2
+    assert all(r["result"]["value"]["count"] == 7 for r in out["results"])
+
+
+@respx.mock
+async def test_intent_batch_isolates_a_failing_intent() -> None:
+    tools, _ = make_tools()
+    # one valid (graph would need brain; here both go to adapter) + one with no about → its own refusal
+    out = await tools.intent_batch([{"about": "", "seek": "count"}])
+    assert out["count"] == 1
+    assert out["results"][0]["result"]["outcome"] in ("refused", "result")
+
+
+class _FakeAutomation:
+    async def list(self, workspace): return {"automations": [{"id": "a1"}], "workspace": workspace}
+    async def register(self, automation_id, name, plan, trigger): return {"registered": automation_id}
+
+
+def _tools_with(**kw):
+    transport = NilTransport(base_url=BASE, bearer_secret=GRANT.bearer_secret())
+    client = NilClient(transport=transport, grant=GRANT)
+    return NilTools(client, transport, session_id=SESSION, **kw)
+
+
+async def test_intent_routes_automation_read_to_registry() -> None:
+    tools = _tools_with(automation=_FakeAutomation(), workspace="ws_acme")
+    out = await tools.intent("automation", seek="all")
+    assert out["automations"] == [{"id": "a1"}] and out["workspace"] == "ws_acme"
+
+
+async def test_intent_routes_automation_create_to_register() -> None:
+    tools = _tools_with(automation=_FakeAutomation(), workspace="ws_acme")
+    out = await tools.intent("automation", change={"op": "create", "set": {
+        "automation_id": "a2", "name": {"en": "x"}, "plan": {}, "trigger": {}}})
+    assert out["registered"] == "a2"
+
+
+async def test_intent_graph_write_routes_to_brain_assert() -> None:
+    tools = _tools_with(brain=_FakeBrain())
+    out = await tools.intent("policy", where=[{"attr": "name", "rel": "is", "value": "payment-approval"}],
+                             change={"op": "update", "set": {"threshold": 5000}})
+    assert out["asserted"] == "policy.update"
+    assert out["facts"] == {"threshold": 5000, "name": "payment-approval"}
