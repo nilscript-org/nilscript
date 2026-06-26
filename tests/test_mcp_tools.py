@@ -260,3 +260,17 @@ async def test_export_backstop_still_guards_a_misbehaving_export() -> None:
     tools, _ = make_tools()
     out = await tools.export("res.partner")
     assert out["code"] == "RESULT_TOO_LARGE"  # even export results pass the relay backstop
+
+
+@respx.mock
+async def test_intent_sends_one_payload_and_backstops() -> None:
+    captured = {}
+    def _cap(request):
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"outcome": "result", "value": {"id": 18, "name": "دينا"}}})
+    respx.post(f"{BASE}/nil/v0.1/query").mock(side_effect=_cap)
+    tools, _ = make_tools()
+    out = await tools.intent("res.partner", where=[{"attr": "name", "rel": "contains", "value": "دينا"}], seek="the")
+    assert captured["body"]["verb"] == "nil.intent"
+    assert captured["body"]["args"]["about"] == "res.partner"
+    assert out["value"]["name"] == "دينا"

@@ -142,11 +142,27 @@ from .export import (  # noqa: E402
     NotAuthorizedHandle,
 )
 from .bulk import BulkResult, run_bulk  # noqa: E402
+from .intent import (  # noqa: E402
+    REL_TO_OP,
+    Binding,
+    BindingResolver,
+    IdentityResolver,
+    Intent,
+    IntentResolver,
+    Outcome,
+)
 
 __all__ = [
     "BYTE_CAP",
     "BULK_THRESHOLD",
+    "REL_TO_OP",
+    "Binding",
+    "BindingResolver",
     "BulkApprovalRequired",
+    "IdentityResolver",
+    "Intent",
+    "IntentResolver",
+    "Outcome",
     "BulkResult",
     "EDGE_FILTER_BOUND",
     "run_bulk",

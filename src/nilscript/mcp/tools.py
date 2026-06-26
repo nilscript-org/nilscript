@@ -153,6 +153,22 @@ class NilTools:
             {"target": target, "filter": filter or [], "fields": fields, "limit": limit, "cursor": cursor},
         )
 
+    async def intent(
+        self,
+        about: str,
+        where: list[dict[str, Any]] | None = None,
+        seek: str = "all",
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """THE single payload. Describe WHAT you want (an entity `about` + `where` criteria + a `seek`
+        shape: the|all|count|summary); the system resolves and executes it deterministically and returns
+        a result or a structured refusal. You never pick a verb or build a query."""
+        return await self.query(
+            "nil.intent",
+            {"about": about, "where": where or [], "seek": seek, "limit": limit, "cursor": cursor},
+        )
+
     async def count(self, target: str, filter: Any = None) -> dict[str, Any]:
         """Just {count} — the first call for any 'how many / does X exist'. Never list to count."""
         return await self.query("nil.count", {"target": target, "filter": filter or []})
