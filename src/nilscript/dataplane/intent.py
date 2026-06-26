@@ -60,6 +60,7 @@ class Intent:
     about: str                      # ontology type / entity (adapter-agnostic)
     where: tuple[Binding, ...] = ()
     seek: str = "all"               # the | all | count | summary  (read shapes)
+    by: str | None = None           # the grouping dimension for seek="summary"
     change: Change | None = None    # present → a write intent (governed via propose→commit→tier)
     limit: int = 50
     cursor: str | None = None
@@ -132,6 +133,10 @@ class IntentResolver:
                     grant_fields=grant_fields,
                 )
                 return Outcome.result(page)
-            return Outcome.refusal("NOT_IMPLEMENTED", "summary (aggregate) lands in the next phase")
+            # seek == "summary": a server-side rollup over a grouping dimension.
+            if not intent.by:
+                return Outcome.refusal("MISSING_DIMENSION", "summary needs a `by` dimension to group on")
+            group_by = self._bind.resolve_attr(intent.about, intent.by)
+            return Outcome.result(self._plane.aggregate(target, filter=filt, group_by=group_by, metrics=("count",)))
         except (ResultTooLarge, CapabilityUnsupported, InvalidFilter) as exc:
             return Outcome.refusal(getattr(exc, "code", "ERROR"), getattr(exc, "message", str(exc)))
