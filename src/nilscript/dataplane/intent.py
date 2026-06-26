@@ -36,12 +36,14 @@ class Binding:
     value: Any
 
 
-# op → the universal generic-CRUD verb every adapter supports (no adapter-specific verb map, no
-# keywords): a change intent executes through resource.* — the deterministic write spine.
+# op → the universal generic verb every adapter supports (no adapter-specific verb map, no keywords):
+# a change intent executes through resource.* — the deterministic write spine. `method` covers workflow
+# actions that are NOT CRUD (post an invoice, validate a picking) via the adapter's generic op=method.
 OP_TO_RESOURCE: dict[str, str] = {
     "create": "resource.create",
     "update": "resource.update",
     "remove": "resource.delete",
+    "method": "resource.method",
 }
 
 
@@ -49,8 +51,12 @@ OP_TO_RESOURCE: dict[str, str] = {
 class Change:
     """The write shape of an intent: what to make true. Resolved → propose→commit→tier (governed)."""
 
-    op: str                 # create | update | remove
+    op: str                 # create | update | remove | method
     set: dict[str, Any] = field(default_factory=dict)
+    # for op="method": the workflow method to invoke (action_post / button_validate / …) and its kwargs.
+    # The adapter's allow-list (default-deny) still governs which (model, method) pairs are committable.
+    method: str | None = None
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
