@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nilscript.org/schemas/0.1/read-plane.schema.json",
+  "title": "NIL Read Data Plane (v0.1)",
+  "description": "The contract every adapter's read surface conforms to: lean, filtered, paginated reads (schema/count/search/get/aggregate) plus a governed export→handle path. Reads are free EXCEPT bulk export, which is gated+audited. A result that exceeds the byte cap is REFUSED, never truncated.",
+  "$defs": {
+    "predicate": {
+      "type": "object",
+      "description": "One typed filter clause. The list of predicates is ANDed server-side.",
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": { "type": "string" },
+        "op": { "enum": ["eq", "ne", "gt", "gte", "lt", "lte", "in", "contains", "ilike", "between"] },
+        "value": {}
+      }
+    },
+    "filter": { "type": "array", "items": { "$ref": "#/$defs/predicate" } },
+    "capabilities": {
+      "type": "object",
+      "description": "What a backend does server-side. Absent capabilities drive honest degradation (edge-side filter within a bound, or refuse) — never a silent fetch-all.",
+      "properties": {
+        "server_filter": { "type": "boolean" },
+        "server_sort": { "type": "boolean" },
+        "server_paginate": { "type": "boolean" },
+        "server_aggregate": { "type": "boolean" }
+      }
+    },
+    "field_spec": {
+      "type": "object",
+      "required": ["name", "type"],
+      "properties": {
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "filterable": { "type": "boolean", "default": true },
+        "sortable": { "type": "boolean", "default": true },
+        "returnable": { "type": "boolean", "default": true },
+        "is_key": { "type": "boolean", "default": false },
+        "sensitivity": { "enum": ["normal", "sensitive"], "default": "normal" }
+      }
+    },
+    "schema_answer": {
+      "type": "object",
+      "description": "nil.schema(target): the queryable shape + how to query it + how the edge degrades.",
+      "required": ["target", "fields", "cardinality", "default_projection", "capabilities"],
+      "properties": {
+        "target": { "type": "string" },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/field_spec" } },
+        "cardinality": { "enum": ["small", "large", "huge"] },
+        "default_projection": { "type": "array", "items": { "type": "string" } },
+        "capabilities": { "$ref": "#/$defs/capabilities" }
+      }
+    },
+    "count_answer": {
+      "type": "object",
+      "required": ["count"],
+      "properties": { "count": { "type": "integer" }, "approximate": { "type": "boolean" } }
+    },
+    "search_answer": {
+      "type": "object",
+      "description": "A lean page. items are PROJECTED records (id + requested fields), never whole records. next_cursor is an opaque keyset token stable for 1M+ paging. redacted lists fields dropped by read authz.",
+      "required": ["items"],
+      "properties": {
+        "items": { "type": "array", "items": { "type": "object", "required": ["id"] } },
+        "total": { "type": "integer" },
+        "next_cursor": { "type": ["string", "null"] },
+        "redacted": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "aggregate_answer": {
+      "type": "object",
+      "required": ["groups"],
+      "properties": {
+        "groups": {
+          "type": "array",
+          "items": { "type": "object", "required": ["key"] }
+        }
+      }
+    },
+    "export_handle": {
+      "type": "object",
+      "description": "A pointer to a tenant-scoped, TTL-expiring artifact — NOT the rows. The agent opens it in its sandbox and computes with code; the bytes never enter context.",
+      "required": ["handle", "format", "rows", "bytes", "expires_at"],
+      "properties": {
+        "handle": { "type": "string" },
+        "format": { "enum": ["jsonl", "csv", "parquet"] },
+        "rows": { "type": "integer" },
+        "bytes": { "type": "integer" },
+        "schema": { "type": "object" },
+        "expires_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "refusal": {
+      "type": "object",
+      "description": "A read refusal is an actionable answer, never a truncated result.",
+      "required": ["outcome", "code"],
+      "properties": {
+        "outcome": { "const": "refused" },
+        "code": {
+          "enum": [
+            "RESULT_TOO_LARGE", "INVALID_FILTER", "FIELD_NOT_FILTERABLE", "FIELD_NOT_SORTABLE",
+            "CAPABILITY_UNSUPPORTED", "BULK_APPROVAL_REQUIRED", "HANDLE_EXPIRED", "NOT_AUTHORIZED"
+          ]
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

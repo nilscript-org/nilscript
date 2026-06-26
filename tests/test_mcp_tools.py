@@ -199,3 +199,64 @@ def test_bad_gate_rejected() -> None:
     client = NilClient(transport=transport, grant=GRANT)
     with pytest.raises(ValueError, match="gate must be one of"):
         NilTools(client, transport, gate="nonsense")
+
+
+@respx.mock
+async def test_query_passes_through_a_small_result() -> None:
+    respx.post(f"{BASE}/nil/v0.1/query").mock(
+        return_value=httpx.Response(
+            200, json={"data": {"target": "res.partner", "count": 1, "items": [{"id": 7, "name": "رغد"}]}}
+        )
+    )
+    tools, _ = make_tools()
+    out = await tools.query("crm.search", {"target": "res.partner"})
+    assert out["items"][0]["name"] == "رغد"
+
+
+@respx.mock
+async def test_query_backstop_refuses_an_oversized_adapter_result() -> None:
+    # A legacy/misbehaving adapter returns a 1 MB unprojected dump. The relay is the LAST line of
+    # defense: it must refuse rather than flood the agent's context — regardless of adapter behavior.
+    flood = {"data": {"items": [{"id": i, "blob": "x" * 1000} for i in range(1000)]}}
+    respx.post(f"{BASE}/nil/v0.1/query").mock(return_value=httpx.Response(200, json=flood))
+    tools, _ = make_tools()
+    out = await tools.query("crm.list_contacts", {})
+    assert out["outcome"] == "refused"
+    assert out["code"] == "RESULT_TOO_LARGE"
+    assert "items" not in out  # the flood never reaches the agent
+
+
+@respx.mock
+async def test_search_sends_canonical_verb_with_structured_args() -> None:
+    captured: dict[str, Any] = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"items": [{"id": 7, "name": "رغد"}], "next_cursor": None}})
+
+    respx.post(f"{BASE}/nil/v0.1/query").mock(side_effect=_capture)
+    tools, _ = make_tools()
+    out = await tools.search("res.partner", filter=[{"field": "name", "op": "ilike", "value": "رغد"}],
+                             fields=["name"], limit=25)
+    assert captured["body"]["verb"] == "nil.search"
+    assert captured["body"]["args"]["target"] == "res.partner"
+    assert captured["body"]["args"]["filter"][0]["op"] == "ilike"
+    assert out["items"][0]["name"] == "رغد"
+
+
+@respx.mock
+async def test_count_is_the_how_many_call() -> None:
+    respx.post(f"{BASE}/nil/v0.1/query").mock(
+        return_value=httpx.Response(200, json={"data": {"count": 12}})
+    )
+    tools, _ = make_tools()
+    assert (await tools.count("account.move", [{"field": "state", "op": "eq", "value": "overdue"}]))["count"] == 12
+
+
+@respx.mock
+async def test_export_backstop_still_guards_a_misbehaving_export() -> None:
+    flood = {"data": {"rows": [{"id": i, "blob": "x" * 1000} for i in range(1000)]}}
+    respx.post(f"{BASE}/nil/v0.1/query").mock(return_value=httpx.Response(200, json=flood))
+    tools, _ = make_tools()
+    out = await tools.export("res.partner")
+    assert out["code"] == "RESULT_TOO_LARGE"  # even export results pass the relay backstop

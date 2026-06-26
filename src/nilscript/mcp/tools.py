@@ -25,6 +25,7 @@ from typing import Any
 
 import httpx
 
+from nilscript.dataplane import ResultTooLarge, enforce_byte_cap
 from nilscript.sdk.client import NilClient
 from nilscript.sdk.connect import handshake
 from nilscript.sdk.idempotency import commit_idempotency_key
@@ -85,6 +86,9 @@ class NilTools:
             self._proposals.setdefault(sid, {})[proposal.id] = {
                 "tier": proposal.tier.value if proposal.tier is not None else None,
                 "verb": proposal.verb,
+                # the human preview (e.g. {"summary": "delete contact AHMED (43)"}) so the owner's
+                # approval screen can show WHAT they're approving, not a bare proposal id.
+                "preview": proposal.preview,
             }
 
     async def describe(self) -> dict[str, Any]:
@@ -115,8 +119,69 @@ class NilTools:
         return body
 
     async def query(self, verb: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
-        """QUERY live business truth. No side effect; the answer is data, never instruction."""
-        return await self._client.query(verb, args or {})
+        """QUERY live business truth. No side effect; the answer is data, never instruction.
+
+        The byte-cap backstop runs HERE, at the relay: even a legacy or misbehaving adapter that
+        returns an unprojected dump cannot flood the agent's context — an oversized result becomes a
+        `RESULT_TOO_LARGE` refusal (a returned value, never an exception, never a truncated page)."""
+        data = await self._client.query(verb, args or {})
+        try:
+            return enforce_byte_cap(data)
+        except ResultTooLarge as exc:
+            return {
+                "outcome": "refused",
+                "code": exc.code,
+                "bytes": exc.bytes,
+                "cap": exc.cap,
+                "message": exc.message,
+            }
+
+    # ── the read data plane (canonical, namespace-agnostic; target carries the entity) ────────────
+    # All route through `query`, so the byte-cap backstop applies uniformly. The adapter dispatches
+    # these canonical verbs to its ReadPlane; a non-conformant adapter answers UNKNOWN_VERB.
+    async def search(
+        self,
+        target: str,
+        filter: Any = None,
+        fields: list[str] | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """A lean, filtered, paginated page. Never whole records; refuses (never truncates) over cap."""
+        return await self.query(
+            "nil.search",
+            {"target": target, "filter": filter or [], "fields": fields, "limit": limit, "cursor": cursor},
+        )
+
+    async def count(self, target: str, filter: Any = None) -> dict[str, Any]:
+        """Just {count} — the first call for any 'how many / does X exist'. Never list to count."""
+        return await self.query("nil.count", {"target": target, "filter": filter or []})
+
+    async def get(self, target: str, id: Any, fields: list[str] | None = None) -> dict[str, Any]:
+        """One lean record by key."""
+        return await self.query("nil.get", {"target": target, "id": id, "fields": fields})
+
+    async def aggregate(
+        self, target: str, group_by: str, metrics: list[str] | None = None, filter: Any = None
+    ) -> dict[str, Any]:
+        """A server-side rollup ('revenue by country') — small result, rows never in context."""
+        return await self.query(
+            "nil.aggregate",
+            {"target": target, "group_by": group_by, "metrics": metrics or ["count"], "filter": filter or []},
+        )
+
+    async def export(
+        self,
+        target: str,
+        filter: Any = None,
+        fields: list[str] | None = None,
+        approved: bool = False,
+    ) -> dict[str, Any]:
+        """Stream a bulk read to a DATA HANDLE (not rows). Above the bulk threshold this is gated +
+        audited (BULK_APPROVAL_REQUIRED until approved). Open the handle in the sandbox and use code."""
+        return await self.query(
+            "nil.export", {"target": target, "filter": filter or [], "fields": fields, "approved": approved}
+        )
 
     async def status(self, proposal_id: str) -> dict[str, Any]:
         """The SSOT status of a proposal: state, replay flag, result, compensation handle."""
@@ -179,10 +244,16 @@ class NilTools:
                 "tier": tier,
                 "message": f"gate=human: a {tier} proposal was REJECTED by the owner; not committed",
             }
-        # pending / unknown → register it for approval and hold
+        # pending / unknown → register it for approval and hold. Pass the verb + human preview so the
+        # owner's Decisions screen shows exactly WHAT they're approving (the gate is the only place
+        # that still holds the proposal detail — a held proposal has no ledger event to enrich from).
+        prop = self._proposals.get(sid, {}).get(proposal_id, {})
         try:
             async with httpx.AsyncClient(timeout=5.0) as c:
-                await c.post(f"{base}/proposals/{proposal_id}/await")
+                await c.post(
+                    f"{base}/proposals/{proposal_id}/await",
+                    json={"verb": prop.get("verb"), "tier": tier, "preview": prop.get("preview")},
+                )
         except httpx.HTTPError:
             pass
         return self._approval_required(tier)

@@ -15,6 +15,7 @@ nilscript.org). `build_asgi_app()` returns an ASGI app for production servers (u
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 # Imported at module scope (not lazily) so the wrapped tool functions' stringized annotations
@@ -139,6 +140,8 @@ def build_server(
     port: int = 8765,
     tools_provider: ToolsProvider | None = None,
     automation_tools: Any = None,
+    brain_tools: Any = None,
+    allowed_hosts: list[str] | None = None,
 ):  # type: ignore[no-untyped-def]
     """Bind the NilTools surface onto a FastMCP server. Imports `mcp` lazily.
 
@@ -149,8 +152,25 @@ def build_server(
     skill/skeleton resources and any `dynamic_verbs` always reflect the `tools` backend (the default).
     `automation_tools` (optional `AutomationTools`) adds the registry tools so an agent can author
     governed automations by talking — bound only when a control-plane registry is configured.
+    `allowed_hosts` (optional) widens the streamable-HTTP DNS-rebinding guard: FastMCP only reads
+    `transport_security` as a constructor kwarg and otherwise auto-enables a localhost-only allowlist,
+    so a server reachable by its container/service or public host (e.g. another in-cluster agent
+    dialing `nilscript-mcp:8765`) is 421-rejected unless those hosts are listed here. Entries may use
+    the SDK's ``host:*`` wildcard-port form. The `/mcp` front door stays bearer-gated regardless.
     """
-    server = FastMCP(name, instructions=_INSTRUCTIONS, host=host, port=port)
+    transport_security = None
+    if allowed_hosts:
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=list(allowed_hosts),
+            allowed_origins=["*"],
+        )
+    server = FastMCP(
+        name, instructions=_INSTRUCTIONS, host=host, port=port,
+        transport_security=transport_security,
+    )
 
     provider = tools_provider if tools_provider is not None else SingletonToolsProvider(tools)
     _register_tools(server, provider)
@@ -161,6 +181,8 @@ def build_server(
     _register_skill(server, tools)
     if automation_tools is not None:
         _register_automation_tools(server, automation_tools)
+    if brain_tools is not None:
+        _register_brain_tools(server, brain_tools)
     return server
 
 
@@ -226,6 +248,55 @@ def _register_automation_tools(server: Any, auto: Any) -> None:
     )
 
 
+def _register_brain_tools(server: Any, brain: Any) -> None:
+    """Bind the read-only Business Graph tools. These answer "show my policies / cycles / what changed /
+    what's overdue" deterministically from the brain read-model — so the agent never improvises (curl,
+    file search) or mistakes a graph question for a missing kernel verb. All read-only, no side effect."""
+
+    async def nil_graph(kind: str | None = None, tenant: str | None = None) -> dict[str, Any]:
+        return await brain.graph(kind, tenant)
+
+    async def nil_cycles(tenant: str | None = None) -> dict[str, Any]:
+        return await brain.cycles(tenant)
+
+    async def nil_overview(tenant: str | None = None) -> dict[str, Any]:
+        return await brain.overview(tenant)
+
+    async def nil_instances(tenant: str | None = None) -> dict[str, Any]:
+        return await brain.instances(tenant)
+
+    async def nil_activity(tenant: str | None = None) -> dict[str, Any]:
+        return await brain.activity(tenant)
+
+    server.add_tool(
+        nil_graph, name="nil_graph",
+        description="READ the Business Graph nodes from the brain. Pass kind to filter: 'policy' (the "
+        "right way to answer 'show my policies' — policies are graph nodes, NOT kernel verbs), 'entity', "
+        "'role', 'flow', or 'cycle'. No side effect. Use this for any 'show me my X' structure question.",
+    )
+    server.add_tool(
+        nil_cycles, name="nil_cycles",
+        description="READ the business cycles (e.g. Sales, Finance) with each cycle's goal, metrics, and "
+        "members. The deterministic answer to 'show me the cycles'. No side effect.",
+    )
+    server.add_tool(
+        nil_overview, name="nil_overview",
+        description="READ a one-glance graph summary: counts of entities, roles, policies, flows, and "
+        "cycles for the workspace. No side effect.",
+    )
+    server.add_tool(
+        nil_instances, name="nil_instances",
+        description="READ live instance tallies per entity type — totals plus derived-state counts such "
+        "as overdue and awaiting_approval. The deterministic answer to 'how many invoices are overdue'. "
+        "No side effect.",
+    )
+    server.add_tool(
+        nil_activity, name="nil_activity",
+        description="READ what recently changed in the Business Graph (latest version additions/diff). "
+        "The deterministic answer to 'what changed this week'. No side effect.",
+    )
+
+
 def _register_tools(server: Any, provider: ToolsProvider) -> None:
     """Wrap each primitive with the MCP Context so the backend + per-connection session resolve from
     the connection: `provider.get(ctx)` picks the backend (one shared, or per-tenant from headers)
@@ -244,6 +315,21 @@ def _register_tools(server: Any, provider: ToolsProvider) -> None:
 
     async def nil_query(verb: str, args: dict[str, Any] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).query(verb, args)
+
+    async def nil_search(target: str, filter: list[dict[str, Any]] | None = None, fields: list[str] | None = None, limit: int = 50, cursor: str | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+        return await provider.get(ctx).search(target, filter, fields, limit, cursor)
+
+    async def nil_count(target: str, filter: list[dict[str, Any]] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+        return await provider.get(ctx).count(target, filter)
+
+    async def nil_get(target: str, id: Any, fields: list[str] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+        return await provider.get(ctx).get(target, id, fields)
+
+    async def nil_aggregate(target: str, group_by: str, metrics: list[str] | None = None, filter: list[dict[str, Any]] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+        return await provider.get(ctx).aggregate(target, group_by, metrics, filter)
+
+    async def nil_export(target: str, filter: list[dict[str, Any]] | None = None, fields: list[str] | None = None, approved: bool = False, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+        return await provider.get(ctx).export(target, filter, fields, approved)
 
     async def nil_status(proposal_id: str, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).status(proposal_id)
@@ -268,6 +354,32 @@ def _register_tools(server: Any, provider: ToolsProvider) -> None:
     server.add_tool(
         nil_query, name="nil_query",
         description="Read live business truth (verb + args). No side effect.",
+    )
+    server.add_tool(
+        nil_search, name="nil_search",
+        description="Lean, FILTERED, PAGINATED read of a target (filter=[{field,op,value}], small fields=, "
+        "limit, cursor). Returns {items:[{id,…projected}], next_cursor} — never whole records, never "
+        "unbounded; an over-cap page is REFUSED (narrow the filter or use nil_export), never truncated.",
+    )
+    server.add_tool(
+        nil_count, name="nil_count",
+        description="Just {count} for a target+filter. The FIRST call for any 'how many / does X exist' — "
+        "never list to count.",
+    )
+    server.add_tool(
+        nil_get, name="nil_get",
+        description="One lean record by key (target + id + optional fields). For exact lookups.",
+    )
+    server.add_tool(
+        nil_aggregate, name="nil_aggregate",
+        description="Server-side rollup (target + group_by + metrics): 'revenue by country', 'count by "
+        "status'. Small result; rows never enter context. Refuses → nil_export when unsupported.",
+    )
+    server.add_tool(
+        nil_export, name="nil_export",
+        description="Stream a bulk read to a DATA HANDLE (not rows): open it in your sandbox and use code "
+        "(pandas/sqlite) for analysis over many rows. Bulk extraction is gated+audited "
+        "(BULK_APPROVAL_REQUIRED until approved=true).",
     )
     server.add_tool(
         nil_status, name="nil_status",
@@ -411,6 +523,24 @@ def serve(
     uvicorn.run(app, host=host, port=port)
 
 
+def _allowed_hosts_from_env() -> list[str] | None:
+    """Parse ``NIL_MCP_ALLOWED_HOSTS`` (JSON list or comma-separated) for the DNS-rebinding allowlist.
+
+    Set by the deploy when the server is reached by a name other than localhost (its container/service
+    name, or a public ``mcp.*`` host behind a reverse proxy). ``None`` (unset/blank) keeps FastMCP's
+    localhost-only default. Entries may use the SDK's ``host:*`` wildcard-port form.
+    """
+    raw = os.environ.get("NIL_MCP_ALLOWED_HOSTS", "").strip()
+    if not raw:
+        return None
+    if raw.startswith("["):
+        hosts = [str(h).strip() for h in json.loads(raw)]
+    else:
+        hosts = [h.strip() for h in raw.split(",")]
+    hosts = [h for h in hosts if h]
+    return hosts or None
+
+
 def build_asgi_app(
     *,
     adapter_url: str,
@@ -460,10 +590,13 @@ def build_asgi_app(
             registry=make_registry_lookup(),
         )
     from nilscript.mcp.automation_tools import AutomationTools
+    from nilscript.mcp.brain_tools import BrainTools
 
     server = build_server(
         tools, dynamic_verbs=verbs, tools_provider=provider,
         automation_tools=AutomationTools.from_env(),
+        brain_tools=BrainTools.from_env(),
+        allowed_hosts=_allowed_hosts_from_env(),
     )
     app = server.streamable_http_app()  # MCP mounted at /mcp
 
