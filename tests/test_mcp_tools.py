@@ -260,3 +260,62 @@ async def test_export_backstop_still_guards_a_misbehaving_export() -> None:
     tools, _ = make_tools()
     out = await tools.export("res.partner")
     assert out["code"] == "RESULT_TOO_LARGE"  # even export results pass the relay backstop
+
+
+@respx.mock
+async def test_intent_sends_one_payload_and_backstops() -> None:
+    captured = {}
+    def _cap(request):
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"outcome": "result", "value": {"id": 18, "name": "دينا"}}})
+    respx.post(f"{BASE}/nil/v0.1/query").mock(side_effect=_cap)
+    tools, _ = make_tools()
+    out = await tools.intent("res.partner", where=[{"attr": "name", "rel": "contains", "value": "دينا"}], seek="the")
+    assert captured["body"]["verb"] == "nil.intent"
+    assert captured["body"]["args"]["about"] == "res.partner"
+    assert out["value"]["name"] == "دينا"
+
+
+@respx.mock
+async def test_intent_change_create_proposes_resource_create() -> None:
+    captured = []
+    def route(request):
+        captured.append(json.loads(request.content)["body"])
+        return httpx.Response(200, json=server_envelope("PROPOSAL", {**PROPOSAL_OK, "verb": "resource.create", "tier": "MEDIUM"}))
+    respx.post(f"{BASE}/nil/v0.1/propose").mock(side_effect=route)
+    tools, _ = make_tools()
+    out = await tools.intent("res.partner", change={"op": "create", "set": {"name": "Sara", "phone": "+9745"}})
+    assert captured[-1]["verb"] == "resource.create"
+    assert captured[-1]["args"]["target"] == "res.partner"
+    assert captured[-1]["args"]["name"] == "Sara"
+    assert out["verb"] == "resource.create"
+
+
+@respx.mock
+async def test_intent_change_update_resolves_id_then_proposes() -> None:
+    respx.post(f"{BASE}/nil/v0.1/query").mock(
+        return_value=httpx.Response(200, json={"data": {"outcome": "result", "value": {"items": [{"id": 18, "name": "دينا"}]}}})
+    )
+    captured = []
+    def route(request):
+        captured.append(json.loads(request.content)["body"])
+        return httpx.Response(200, json=server_envelope("PROPOSAL", {**PROPOSAL_OK, "verb": "resource.update", "tier": "MEDIUM"}))
+    respx.post(f"{BASE}/nil/v0.1/propose").mock(side_effect=route)
+    tools, _ = make_tools()
+    out = await tools.intent("res.partner", where=[{"attr": "name", "rel": "contains", "value": "دينا"}],
+                             change={"op": "update", "set": {"phone": "+97400000000"}})
+    assert captured[-1]["verb"] == "resource.update"
+    assert captured[-1]["args"]["id"] == 18           # id resolved from the read
+    assert captured[-1]["args"]["phone"] == "+97400000000"
+    assert out["verb"] == "resource.update"
+
+
+@respx.mock
+async def test_intent_change_update_no_match_is_refusal() -> None:
+    respx.post(f"{BASE}/nil/v0.1/query").mock(
+        return_value=httpx.Response(200, json={"data": {"outcome": "result", "value": {"items": []}}})
+    )
+    tools, _ = make_tools()
+    out = await tools.intent("res.partner", where=[{"attr": "name", "rel": "contains", "value": "زز"}],
+                             change={"op": "update", "set": {"phone": "+9"}})
+    assert out["outcome"] == "refused" and out["code"] == "NO_MATCH"

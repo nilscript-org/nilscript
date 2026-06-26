@@ -25,7 +25,7 @@ from typing import Any
 
 import httpx
 
-from nilscript.dataplane import ResultTooLarge, enforce_byte_cap
+from nilscript.dataplane import OP_TO_RESOURCE, ResultTooLarge, enforce_byte_cap
 from nilscript.sdk.client import NilClient
 from nilscript.sdk.connect import handshake
 from nilscript.sdk.idempotency import commit_idempotency_key
@@ -152,6 +152,59 @@ class NilTools:
             "nil.search",
             {"target": target, "filter": filter or [], "fields": fields, "limit": limit, "cursor": cursor},
         )
+
+    async def intent(
+        self,
+        about: str,
+        where: list[dict[str, Any]] | None = None,
+        seek: str = "all",
+        change: dict[str, Any] | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """THE single payload — reads AND writes. Describe WHAT you want: an entity `about` + `where`
+        criteria + either a `seek` shape (the|all|count|summary, a read) or a `change`
+        {op: create|update|remove, set:{...}} (a governed write). The system resolves and executes it
+        deterministically — for a read it returns a lean result; for a change it returns a PREVIEW
+        (proposal) that the gate/owner commits. You never pick a verb or build a query."""
+        if change:
+            return await self._intent_change(about, where or [], change, session_id=session_id)
+        return await self.query(
+            "nil.intent",
+            {"about": about, "where": where or [], "seek": seek, "limit": limit, "cursor": cursor},
+        )
+
+    async def _intent_change(
+        self, about: str, where: list[dict[str, Any]], change: dict[str, Any], *, session_id: str | None
+    ) -> dict[str, Any]:
+        """A change intent → a governed proposal via the universal generic-CRUD spine (resource.*).
+        create writes `set`; update/remove first resolve the target record(s) by `where` (a read), then
+        propose per record. No adapter-specific verb map, no keyword matching, governance unchanged."""
+        op = change.get("op")
+        verb = OP_TO_RESOURCE.get(op)
+        if verb is None:
+            return {"outcome": "refused", "code": "INVALID_OP",
+                    "message": f"change.op must be one of {sorted(OP_TO_RESOURCE)}"}
+        fields = change.get("set") or {}
+        if op == "create":
+            return await self.propose(verb, {"target": about, **fields}, session_id=session_id)
+        # update / remove → resolve the target record(s) first (deterministic read), then propose.
+        read = await self.query(
+            "nil.intent", {"about": about, "where": where, "seek": "all", "limit": 25, "cursor": None}
+        )
+        items = (read.get("value") or {}).get("items", []) if read.get("outcome") == "result" else []
+        if not items:
+            return {"outcome": "refused", "code": "NO_MATCH",
+                    "message": "no record matches the criteria; nothing to change"}
+        proposals = []
+        for item in items:
+            args = {"target": about, "id": item.get("id")}
+            if op == "update":
+                args.update(fields)
+            proposals.append(await self.propose(verb, args, session_id=session_id))
+        return proposals[0] if len(proposals) == 1 else {"outcome": "proposals", "items": proposals}
 
     async def count(self, target: str, filter: Any = None) -> dict[str, Any]:
         """Just {count} — the first call for any 'how many / does X exist'. Never list to count."""
