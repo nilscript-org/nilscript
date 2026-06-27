@@ -219,12 +219,16 @@ class EventStore:
             self._conn.commit()
         return True
 
-    def recent(self, limit: int = 100) -> list[dict[str, Any]]:
+    def recent(self, limit: int = 100, workspace: str | None = None) -> list[dict[str, Any]]:
+        # SaaS isolation: when a workspace is given, return ONLY that tenant's events. Pass None only
+        # for the operator/global timeline.
+        where = "WHERE workspace = ? " if workspace is not None else ""
+        params: tuple[Any, ...] = (workspace, max(1, min(limit, 1000))) if workspace is not None else (max(1, min(limit, 1000)),)
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, received_at, workspace, sequence, grant_id, source, performative, "
-                "event, proposal, verb, tier, severity, envelope FROM events ORDER BY id DESC LIMIT ?",
-                (max(1, min(limit, 1000)),),
+                f"event, proposal, verb, tier, severity, envelope FROM events {where}ORDER BY id DESC LIMIT ?",
+                params,
             ).fetchall()
         # An executed/refused event omits verb/tier and the human preview (those live on the
         # proposal). Pull them from each row's matching `proposed` event in ONE query so the timeline
@@ -493,12 +497,21 @@ class EventStore:
             self._conn.commit()
             return cur.rowcount > 0
 
-    def pending(self) -> list[dict[str, Any]]:
+    def pending(self, workspace: str | None = None) -> list[dict[str, Any]]:
+        # SaaS isolation: the approvals table has no workspace column (the gate's hold call sends none),
+        # so scope by JOINing each held proposal to its `proposed` event's workspace. A tenant sees only
+        # its own held proposals; None = operator/global view.
+        if workspace is None:
+            sql = ("SELECT proposal_id, verb, tier, preview, created_at FROM approvals "
+                   "WHERE status = 'pending' ORDER BY created_at DESC")
+            params: tuple[Any, ...] = ()
+        else:
+            sql = ("SELECT a.proposal_id, a.verb, a.tier, a.preview, a.created_at FROM approvals a "
+                   "WHERE a.status = 'pending' AND EXISTS (SELECT 1 FROM events e "
+                   "WHERE e.proposal = a.proposal_id AND e.workspace = ?) ORDER BY a.created_at DESC")
+            params = (workspace,)
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT proposal_id, verb, tier, preview, created_at FROM approvals "
-                "WHERE status = 'pending' ORDER BY created_at DESC"
-            ).fetchall()
+            rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     # ── active-adapter registry (multi-tenant routing) ───────────────────────────────────────

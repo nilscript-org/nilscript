@@ -223,8 +223,10 @@ def create_app(
         return {"ok": True, "new": new}
 
     @app.get("/api/events")
-    def events(limit: int = 100) -> dict[str, Any]:
-        return {"events": store.recent(limit)}
+    def events(limit: int = 100, workspace: str | None = None) -> dict[str, Any]:
+        # SaaS: a workspace query param scopes the timeline to that tenant (the BFF passes the
+        # authenticated workspace); omitted = operator/global view.
+        return {"events": store.recent(limit, workspace=workspace)}
 
     @app.get("/api/events/{event_id}")
     def event_detail(event_id: int) -> Any:
@@ -302,8 +304,9 @@ def create_app(
         return result
 
     @app.get("/api/pending")
-    def pending() -> dict[str, Any]:
-        return {"pending": store.pending()}
+    def pending(workspace: str | None = None) -> dict[str, Any]:
+        # SaaS: scope held proposals to the tenant (joined to its events' workspace); omitted = global.
+        return {"pending": store.pending(workspace=workspace)}
 
     @app.get("/api/adapters")
     def adapters() -> dict[str, Any]:

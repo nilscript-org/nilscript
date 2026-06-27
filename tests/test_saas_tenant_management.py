@@ -118,3 +118,46 @@ def test_quota_caps_volume_per_tenant() -> None:
     assert q.charge("ws_b", "export") is True           # B still has quota
     assert q.charge("ws_a", "write") is True            # unmetered kind passes
     assert q.remaining("ws_b", "export") == 1
+
+
+# ── JWKS resolver (production keycloak path) ──────────────────────────────────────────────────────
+def test_jwks_resolver_verifies_with_rotating_keys() -> None:
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from nilscript.mcp.auth import make_jwks_claim_resolver
+
+    priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pub = priv.public_key()
+
+    class _FakeJWK:
+        key = pub
+
+    class _FakeClient:
+        def get_signing_key_from_jwt(self, token): return _FakeJWK()
+
+    token = jwt.encode({"exp": 9999999999, "workspace": "ws_a"}, priv, algorithm="RS256")
+    r = make_jwks_claim_resolver("https://kc/certs", jwk_client=_FakeClient())
+    assert r(_ctx_with(token)) == "ws_a"
+    # a token signed by a DIFFERENT key (not in the JWKS) → verification fails → None
+    other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    forged = jwt.encode({"exp": 9999999999, "workspace": "ws_a"}, other, algorithm="RS256")
+    assert r(_ctx_with(forged)) is None
+
+
+# ── tenant-scoped durable execution (Temporal-ready) ─────────────────────────────────────────────
+def test_durable_ids_and_namespace_are_tenant_isolated() -> None:
+    from nilscript.durable import tenant_namespace, tenant_workflow_id
+
+    a = tenant_workflow_id("ws_a", "bulk_delete", "job1")
+    b = tenant_workflow_id("ws_b", "bulk_delete", "job1")
+    assert a != b and a == tenant_workflow_id("ws_a", "bulk_delete", "job1")  # isolated + deterministic
+    assert tenant_namespace("ws_a") != tenant_namespace("ws_b")
+
+
+def test_durable_policy_throttles_per_tenant() -> None:
+    from nilscript.durable import TenantDurablePolicy
+
+    clock = {"t": 0.0}
+    pol = TenantDurablePolicy(TenantRateLimiter(rate=1.0, burst=2.0, now=lambda: clock["t"]))
+    assert pol.admit("ws_a") and pol.admit("ws_a")
+    assert pol.admit("ws_a") is False     # A over budget
+    assert pol.admit("ws_b") is True      # B unaffected
