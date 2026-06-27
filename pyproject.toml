@@ -44,9 +44,19 @@ mcp = [
   "nilscript[sdk]",
   "mcp>=1.2",
 ]
+# SaaS multi-tenancy: the JWT claim verifier (mcp/auth.py) + the encrypted per-tenant secret vault
+# (nilscript/secrets/). The kernel core stays dependency-free; these load only with the [saas] extra.
+saas = [
+  "pyjwt[crypto]>=2.8",   # verify keycloak JWTs (workspace claim); [crypto] pulls RS/ES + JWKS support
+  "cryptography>=42",     # Fernet — the secret vault's encrypt-at-rest
+]
+# Tenant-scoped DURABLE execution (durable_temporal.py) — optional Temporal worker integration.
+temporal = ["temporalio>=1.20"]
 dev = [
   "nilscript[sdk]",
   "nilscript[cli]",
+  "nilscript[saas]",
+  "nilscript[temporal]",
   "mcp>=1.2",  # the MCP server's unit tests import nilscript.mcp
   "pytest",
   "pytest-asyncio>=0.24",
