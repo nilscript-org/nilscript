@@ -108,11 +108,15 @@ class TenantToolsProvider(ToolsProvider):
         allow_insecure: bool = False,
         gate: str = "two-step",
         registry: Any = None,
+        saas: bool = False,
+        claim_resolver: Any = None,
     ) -> None:
         self._default = default
         self._allow_insecure = allow_insecure
         self._gate = gate
         self._registry = registry
+        self._saas = saas
+        self._claim_resolver = claim_resolver
         self._cache: dict[str, NilTools] = {}
 
     def get(self, ctx: Any) -> NilTools:
@@ -123,6 +127,7 @@ class TenantToolsProvider(ToolsProvider):
         tenant = resolve_tenant(
             ctx, default=self._default, multi_tenant=True,
             allow_insecure=self._allow_insecure, registry=self._registry,
+            saas=self._saas, claim_resolver=self._claim_resolver,
         )
         tools = build_tools(
             adapter_url=tenant.adapter_url,
@@ -586,8 +591,16 @@ def build_asgi_app(
     auth_token: str | None = None,
     multi_tenant: bool = False,
     allow_insecure: bool = False,
+    saas: bool | None = None,
+    claim_resolver: Any = None,
 ):  # type: ignore[no-untyped-def]
     """Return a streamable-HTTP ASGI app for production hosting (uvicorn/gunicorn behind nilscript.org).
+
+    `saas=True` (or env `NIL_MCP_SAAS=1`) turns on full tenant ISOLATION: the tenant is the
+    authenticated identity (a `claim_resolver` reads the verified JWT `workspace` claim), no header can
+    override it, and routing goes to that tenant's registered active adapter. SaaS requires a
+    `claim_resolver` — without one it fails closed (a deployment must inject a JWT-verifying resolver),
+    so SaaS can never silently fall back to trusting a free header.
 
     Single-tenant (default): the skeleton is discovered once at build time so per-verb tools reflect
     the mounted adapter, and all connections share that backend.
@@ -618,8 +631,15 @@ def build_asgi_app(
         adapter_url=adapter_url, grant_id=grant_id, workspace=workspace,
         bearer=bearer, scopes=scopes, gate=gate, brain=brain, automation=automation,
     )
+    if saas is None:
+        saas = os.environ.get("NIL_MCP_SAAS", "") in ("1", "true", "True")
+    if saas and claim_resolver is None:
+        raise ValueError(
+            "SaaS mode requires a claim_resolver (a JWT workspace-claim verifier) — refusing to start "
+            "without authenticated tenant identity (would otherwise trust a free header)"
+        )
     provider: ToolsProvider | None = None
-    if multi_tenant:
+    if multi_tenant or saas:
         default = Tenant(
             adapter_url=adapter_url, bearer=bearer, grant_id=grant_id,
             workspace=workspace, scopes=scopes,
@@ -628,7 +648,7 @@ def build_asgi_app(
 
         provider = TenantToolsProvider(
             default=default, allow_insecure=allow_insecure, gate=gate,
-            registry=make_registry_lookup(),
+            registry=make_registry_lookup(), saas=saas, claim_resolver=claim_resolver,
         )
     server = build_server(
         tools, dynamic_verbs=verbs, tools_provider=provider,

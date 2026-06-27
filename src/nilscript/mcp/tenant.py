@@ -66,17 +66,45 @@ def resolve_tenant(
     multi_tenant: bool = False,
     allow_insecure: bool = False,
     registry: Callable[[str], Tenant | None] | None = None,
+    saas: bool = False,
+    claim_resolver: Callable[[Any], str | None] | None = None,
 ) -> Tenant:
     """Resolve the backend for this connection.
 
     Single-tenant (default): always return `default` (back-compat — the env-configured backend).
-    Multi-tenant: read the `X-NIL-*` headers; require an https adapter URL. Resolution precedence for
-    a multi-tenant connection:
-      1. `X-NIL-Adapter-Url` header → true per-connection BYO (always wins);
-      2. else, if the connection names a workspace (`X-NIL-Workspace`) and a `registry` lookup is
-         given, route to that workspace's *active* adapter (the control-plane registry);
-      3. else `default` if one exists, else `TenantError`.
+
+    SaaS (`saas=True`): the tenant is the AUTHENTICATED identity, never a free header. The
+    `claim_resolver` returns the workspace from the verified credential (JWT `workspace` claim /
+    keycloak realm); the `X-NIL-Workspace` header may NOT override it, a BYO `X-NIL-Adapter-Url` is
+    rejected (identity routes to the tenant's *registered active* adapter), and a missing claim is
+    default-deny. This is the isolation spine: a token for tenant A can only ever reach A's backend.
+
+    Multi-tenant (self-hosted / dev, `multi_tenant=True` without `saas`): the connection brings its own
+    backend via the `X-NIL-*` headers (BYO), or routes by the `X-NIL-Workspace` header via the registry.
+    Header-trust is acceptable here because the deployment is single-owner; it is NOT in SaaS.
     """
+    if saas:
+        if claim_resolver is None:
+            raise TenantError("SaaS mode requires an authenticated-claim resolver")
+        claimed = claim_resolver(ctx)
+        if not claimed:
+            raise TenantError("no authenticated workspace claim — default-deny")
+        headers = _headers(ctx)
+        header_ws = _get(headers, WORKSPACE_HEADER)
+        if header_ws and header_ws != claimed:
+            raise TenantError("the workspace header cannot override the authenticated tenant")
+        if _get(headers, ADAPTER_URL_HEADER):
+            raise TenantError(
+                "a BYO adapter-url is not allowed in SaaS mode; identity routes to the tenant's "
+                "registered active adapter"
+            )
+        if registry is None:
+            raise TenantError("SaaS mode requires the control-plane registry")
+        resolved = registry(claimed)
+        if resolved is None:
+            raise TenantError(f"workspace '{claimed}' has no active adapter")
+        return resolved
+
     if not multi_tenant:
         if default is None:
             raise TenantError("single-tenant mode requires a default backend (set NIL_ADAPTER_URL)")

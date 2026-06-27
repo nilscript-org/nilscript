@@ -139,3 +139,59 @@ def test_registry_not_consulted_without_workspace() -> None:
     ctx = _FakeCtx({})  # no workspace, no adapter url
     assert resolve_tenant(ctx, default=DEFAULT, multi_tenant=True, registry=reg) is DEFAULT
     assert calls == []  # no workspace → registry never queried
+
+
+# ── SaaS identity spine: tenant from authenticated claim, header cannot override, default-deny ──────
+_ADAPTERS = {
+    "ws_a": Tenant(adapter_url="https://a-adapter", bearer="a-sec", workspace="ws_a"),
+    "ws_b": Tenant(adapter_url="https://b-adapter", bearer="b-sec", workspace="ws_b"),
+}
+
+
+def _saas_reg(ws: str):
+    return _ADAPTERS.get(ws)
+
+
+def _claim(ws: str | None):
+    return lambda ctx: ws
+
+
+def test_saas_routes_to_the_authenticated_tenants_adapter() -> None:
+    t = resolve_tenant(_FakeCtx({}), saas=True, claim_resolver=_claim("ws_a"), registry=_saas_reg)
+    assert t.adapter_url == "https://a-adapter" and t.workspace == "ws_a"
+
+
+def test_saas_two_tenants_are_isolated() -> None:
+    a = resolve_tenant(_FakeCtx({}), saas=True, claim_resolver=_claim("ws_a"), registry=_saas_reg)
+    b = resolve_tenant(_FakeCtx({}), saas=True, claim_resolver=_claim("ws_b"), registry=_saas_reg)
+    assert a.adapter_url != b.adapter_url  # A can never reach B's backend
+
+
+def test_saas_header_cannot_override_authenticated_tenant() -> None:
+    # token says ws_a; attacker sends X-NIL-Workspace: ws_b → refused, never routed to B
+    with pytest.raises(TenantError):
+        resolve_tenant(_FakeCtx({"x-nil-workspace": "ws_b"}), saas=True,
+                       claim_resolver=_claim("ws_a"), registry=_saas_reg)
+
+
+def test_saas_byo_adapter_url_is_rejected() -> None:
+    with pytest.raises(TenantError):
+        resolve_tenant(_FakeCtx({ADAPTER_URL_HEADER: "https://attacker"}), saas=True,
+                       claim_resolver=_claim("ws_a"), registry=_saas_reg)
+
+
+def test_saas_missing_claim_is_default_deny() -> None:
+    with pytest.raises(TenantError):
+        resolve_tenant(_FakeCtx({}), saas=True, claim_resolver=_claim(None), registry=_saas_reg)
+
+
+def test_saas_unknown_workspace_has_no_adapter() -> None:
+    with pytest.raises(TenantError):
+        resolve_tenant(_FakeCtx({}), saas=True, claim_resolver=_claim("ws_ghost"), registry=_saas_reg)
+
+
+def test_saas_matching_header_is_allowed() -> None:
+    # header equal to the claim is fine (clients may echo it); only a MISMATCH is refused
+    t = resolve_tenant(_FakeCtx({"x-nil-workspace": "ws_a"}), saas=True,
+                       claim_resolver=_claim("ws_a"), registry=_saas_reg)
+    assert t.workspace == "ws_a"
