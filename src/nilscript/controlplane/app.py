@@ -310,6 +310,7 @@ def create_app(
             verb=body.get("verb"),
             tier=body.get("tier"),
             preview=body.get("preview"),
+            workspace=body.get("workspace") or "",
         )
 
     @app.get("/proposals/{proposal_id}/decision")

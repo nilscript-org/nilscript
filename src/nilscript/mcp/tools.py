@@ -366,7 +366,12 @@ class NilTools:
             async with httpx.AsyncClient(timeout=5.0) as c:
                 await c.post(
                     f"{base}/proposals/{proposal_id}/await",
-                    json={"verb": prop.get("verb"), "tier": tier, "preview": prop.get("preview")},
+                    json={
+                        "verb": prop.get("verb"),
+                        "tier": tier,
+                        "preview": prop.get("preview"),
+                        "workspace": self._workspace,  # SaaS isolation: the hold carries its tenant
+                    },
                 )
         except httpx.HTTPError:
             pass

@@ -35,6 +35,7 @@ CREATE INDEX IF NOT EXISTS ix_events_id ON events(id DESC);
 CREATE TABLE IF NOT EXISTS approvals (
     proposal_id TEXT PRIMARY KEY,
     status      TEXT NOT NULL DEFAULT 'pending',
+    workspace   TEXT NOT NULL DEFAULT '',
     verb        TEXT,
     tier        TEXT,
     preview     TEXT,
@@ -193,6 +194,17 @@ class EventStore:
                 # Cycle AST SSOT: kind='cycle' rows carry the canonical Cycle in `source` (the
                 # `plan` is the derived, lowered WosoolProgram). NULL for plain automations.
                 self._conn.execute("ALTER TABLE automations ADD COLUMN source TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already present
+            try:
+                # SaaS isolation (root): a held proposal carries its OWN workspace (recorded by the
+                # gate at hold-time), so per-tenant `pending` filters on it directly — no fragile join
+                # to the ledger by proposal_id. Backfill of legacy rows is best-effort from events.
+                self._conn.execute("ALTER TABLE approvals ADD COLUMN workspace TEXT NOT NULL DEFAULT ''")
+                self._conn.execute(
+                    "UPDATE approvals SET workspace = COALESCE((SELECT e.workspace FROM events e "
+                    "WHERE e.proposal = approvals.proposal_id LIMIT 1), '') WHERE workspace = ''"
+                )
             except sqlite3.OperationalError:
                 pass  # column already present
             self._conn.commit()
@@ -527,6 +539,7 @@ class EventStore:
         verb: str | None = None,
         tier: str | None = None,
         preview: Any = None,
+        workspace: str = "",
     ) -> dict[str, Any]:
         """Register a proposal as awaiting human approval (idempotent — keeps an existing decision).
 
@@ -546,10 +559,11 @@ class EventStore:
                 else (preview if preview is not None else meta["preview"])
             )
             self._conn.execute(
-                "INSERT INTO approvals (proposal_id, status, verb, tier, preview, created_at) "
-                "VALUES (?, 'pending', ?, ?, ?, ?)",
+                "INSERT INTO approvals (proposal_id, status, workspace, verb, tier, preview, created_at) "
+                "VALUES (?, 'pending', ?, ?, ?, ?, ?)",
                 (
                     proposal_id,
+                    workspace or "",
                     verb or meta["verb"],
                     tier or meta["tier"],
                     preview_str,
@@ -583,9 +597,10 @@ class EventStore:
             return cur.rowcount > 0
 
     def pending(self, workspace: str | None = None) -> list[dict[str, Any]]:
-        # SaaS isolation: the approvals table has no workspace column (the gate's hold call sends none),
-        # so scope by JOINing each held proposal to its `proposed` event's workspace. A tenant sees only
-        # its own held proposals; None = operator/global view.
+        # SaaS isolation (root fix): each held proposal carries its OWN `workspace`, recorded by the
+        # gate at hold-time, so a tenant sees only its holds by a DIRECT column filter — no fragile
+        # join to the ledger by proposal_id. The legacy events-join is kept ONLY as a fallback for
+        # pre-migration rows whose workspace is still ''. None = operator/global view.
         if workspace is None:
             sql = (
                 "SELECT proposal_id, verb, tier, preview, created_at FROM approvals "
@@ -595,10 +610,13 @@ class EventStore:
         else:
             sql = (
                 "SELECT a.proposal_id, a.verb, a.tier, a.preview, a.created_at FROM approvals a "
-                "WHERE a.status = 'pending' AND EXISTS (SELECT 1 FROM events e "
-                "WHERE e.proposal = a.proposal_id AND e.workspace = ?) ORDER BY a.created_at DESC"
+                "WHERE a.status = 'pending' AND ("
+                "  a.workspace = ?"
+                "  OR (a.workspace = '' AND EXISTS (SELECT 1 FROM events e "
+                "      WHERE e.proposal = a.proposal_id AND e.workspace = ?))"
+                ") ORDER BY a.created_at DESC"
             )
-            params = (workspace,)
+            params = (workspace, workspace)
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
