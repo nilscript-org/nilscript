@@ -15,6 +15,12 @@ from nilscript.cycle.authoring import (
 )
 from nilscript.cycle.compile import CompileResult, compile_cycle
 from nilscript.cycle.hash import cycle_content_hash
+from nilscript.cycle.lsp import (
+    completions,
+    diagnostics,
+    hover,
+    semantic_tokens,
+)
 from nilscript.cycle.nil_parser import NilSyntaxError, parse_nil
 from nilscript.cycle.nil_printer import print_nil
 from nilscript.cycle.models import (
@@ -71,4 +77,8 @@ __all__ = [
     "cycle_slug",
     "draft_cycle",
     "register_cycle",
+    "diagnostics",
+    "completions",
+    "hover",
+    "semantic_tokens",
 ]

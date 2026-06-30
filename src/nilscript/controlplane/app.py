@@ -38,7 +38,22 @@ from nilscript.automation import (
 )
 from nilscript.automation.compose import StageRunner
 from nilscript.controlplane.store import EventStore
-from nilscript.cycle import draft_cycle, register_cycle
+from nilscript.cycle import (
+    Cycle,
+    NilSyntaxError,
+    completions as lsp_completions,
+    diagnostics as lsp_diagnostics,
+    draft_cycle,
+    governance_report,
+    hover as lsp_hover,
+    parse_nil,
+    print_nil,
+    register_cycle,
+    semantic_tokens as lsp_semantic_tokens,
+    simulate,
+    to_markdown,
+    to_mermaid,
+)
 from nilscript.kernel.diagnostics import ValidationResult
 from nilscript.kernel.executor import LocalExecutor
 from nilscript.sdk.client import NilClient
@@ -752,6 +767,150 @@ def create_app(
         """The latest version of every registered cycle in a workspace (kind='cycle')."""
         cycles = [a for a in store.list_automations(workspace) if a.get("kind") == "cycle"]
         return {"cycles": cycles}
+
+    # ── Cycle .nil surface + language services (the LSP brain — a projection, no state) ────────
+    async def _read_body(request: Request) -> tuple[dict[str, Any] | None, Any]:
+        try:
+            return await request.json(), None
+        except (ValueError, TypeError):
+            return None, JSONResponse({"error": "bad json"}, status_code=400)
+
+    async def _lsp_ctx(workspace: str | None) -> ValidationContext | None:
+        """Build a verb-catalog context from the workspace's live skeleton, or None when no workspace
+        is given or no reachable active adapter answers (the LSP then skips V4/V5 verb checks)."""
+        if not workspace:
+            return None
+        skeleton = await provider(workspace)
+        if skeleton is None:
+            return None
+        return context_from_skeleton(workspace, skeleton)
+
+    @app.post("/cycles/parse")
+    async def cycle_parse_endpoint(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> Any:
+        """`.nil` text → the validated Cycle AST, or a structured `{message, line, col}` syntax error."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        body, err = await _read_body(request)
+        if err is not None:
+            return err
+        text = (body or {}).get("text", "")
+        try:
+            cycle = parse_nil(text)
+        except NilSyntaxError as exc:
+            return {
+                "ok": False,
+                "error": {"message": exc.message, "line": exc.line, "col": exc.col},
+            }
+        return {"ok": True, "cycle": cycle.model_dump(by_alias=True, mode="json")}
+
+    @app.post("/cycles/print")
+    async def cycle_print_endpoint(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> Any:
+        """A Cycle AST → its canonical `.nil` text. 400 on a malformed cycle."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        body, err = await _read_body(request)
+        if err is not None:
+            return err
+        try:
+            cycle = Cycle.model_validate((body or {}).get("cycle"))
+        except (ValidationError, ValueError) as exc:
+            return JSONResponse({"error": f"malformed cycle: {exc}"}, status_code=400)
+        return {"ok": True, "text": print_nil(cycle)}
+
+    @app.post("/cycles/lsp/diagnostics")
+    async def cycle_lsp_diagnostics(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> Any:
+        """Live diagnostics for `.nil` text. With a reachable `workspace` the verbs are validated
+        (V4/V5); without one the verb checks are skipped (an info diag says so)."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        body, err = await _read_body(request)
+        if err is not None:
+            return err
+        body = body or {}
+        ctx = await _lsp_ctx(body.get("workspace"))
+        return {"diagnostics": lsp_diagnostics(body.get("text", ""), ctx)}
+
+    @app.post("/cycles/lsp/completions")
+    async def cycle_lsp_completions(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> Any:
+        """Context-aware completions at (line, col) in `.nil` text."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        body, err = await _read_body(request)
+        if err is not None:
+            return err
+        body = body or {}
+        ctx = await _lsp_ctx(body.get("workspace"))
+        items = lsp_completions(
+            body.get("text", ""), int(body.get("line", 1)), int(body.get("col", 1)), ctx
+        )
+        return {"completions": items}
+
+    @app.post("/cycles/lsp/hover")
+    async def cycle_lsp_hover(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> Any:
+        """Hover detail for the identifier under the cursor (may be null)."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        body, err = await _read_body(request)
+        if err is not None:
+            return err
+        body = body or {}
+        ctx = await _lsp_ctx(body.get("workspace"))
+        info = lsp_hover(
+            body.get("text", ""), int(body.get("line", 1)), int(body.get("col", 1)), ctx
+        )
+        return {"hover": info}
+
+    @app.post("/cycles/lsp/semantic-tokens")
+    async def cycle_lsp_semantic_tokens(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> Any:
+        """Deterministic token classification for syntax highlighting."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        body, err = await _read_body(request)
+        if err is not None:
+            return err
+        return {"tokens": lsp_semantic_tokens((body or {}).get("text", ""))}
+
+    @app.post("/cycles/projections")
+    async def cycle_projections_endpoint(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> Any:
+        """A read-only projection of a Cycle AST: a mermaid diagram, markdown docs, a happy-path
+        simulation, or the governance trust summary."""
+        if not _registry_authed(authorization):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        body, err = await _read_body(request)
+        if err is not None:
+            return err
+        body = body or {}
+        kind = body.get("kind")
+        projections = {
+            "mermaid": to_mermaid,
+            "markdown": to_markdown,
+            "simulate": simulate,
+            "governance": governance_report,
+        }
+        fn = projections.get(kind)
+        if fn is None:
+            return JSONResponse(
+                {"error": f"unknown projection kind {kind!r}"}, status_code=400
+            )
+        try:
+            cycle = Cycle.model_validate(body.get("cycle"))
+        except (ValidationError, ValueError) as exc:
+            return JSONResponse({"error": f"malformed cycle: {exc}"}, status_code=400)
+        return {"result": fn(cycle)}
 
     # ── cross-system composed automations (P3) ──────────────────────────────────────────────
     async def _validate_composed_body(body: dict[str, Any]) -> tuple[Any, Any]:
