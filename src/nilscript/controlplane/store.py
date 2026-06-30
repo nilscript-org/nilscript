@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS automations (
     name          TEXT    NOT NULL DEFAULT '{}',
     description   TEXT,
     plan          TEXT    NOT NULL,
+    source        TEXT,
     trigger       TEXT    NOT NULL,
     state         TEXT    NOT NULL DEFAULT 'draft',
     authored_by   TEXT    NOT NULL DEFAULT '',
@@ -108,8 +109,8 @@ CREATE INDEX IF NOT EXISTS ix_runs_auto ON automation_runs(workspace, automation
 
 # Columns surfaced by the automation registry reads (JSON columns parsed back by `_automation_row`).
 _AUTOMATION_COLS = (
-    "workspace, automation_id, version, content_hash, kind, name, description, plan, trigger, "
-    "state, authored_by, approved_by, created_at, superseded_by"
+    "workspace, automation_id, version, content_hash, kind, name, description, plan, source, "
+    "trigger, state, authored_by, approved_by, created_at, superseded_by"
 )
 
 # Columns surfaced by the registry read methods (bearer included — the API layer redacts for the
@@ -170,7 +171,9 @@ class EventStore:
         try:
             from nilscript.secrets import SecretVault
 
-            self._vault = SecretVault.from_env()  # NIL_VAULT_KEY; raises if unset → stays None
+            self._vault = (
+                SecretVault.from_env()
+            )  # NIL_VAULT_KEY; raises if unset → stays None
         except Exception:  # noqa: BLE001 — no/invalid key ⇒ vault disabled, not crashed
             self._vault = None
         with self._lock:
@@ -186,9 +189,17 @@ class EventStore:
                 )
             except sqlite3.OperationalError:
                 pass  # column already present (or table created fresh with it)
+            try:
+                # Cycle AST SSOT: kind='cycle' rows carry the canonical Cycle in `source` (the
+                # `plan` is the derived, lowered WosoolProgram). NULL for plain automations.
+                self._conn.execute("ALTER TABLE automations ADD COLUMN source TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already present
             self._conn.commit()
 
-    def ingest(self, envelope: dict[str, Any], sequence: int | None, *, source: str = "") -> bool:
+    def ingest(
+        self, envelope: dict[str, Any], sequence: int | None, *, source: str = ""
+    ) -> bool:
         """Store one event. Returns False (no-op) if (workspace, sequence) was already seen."""
         body = envelope.get("body") or {}
         ws = envelope.get("workspace", "") or ""
@@ -198,11 +209,14 @@ class EventStore:
         eid = envelope.get("id")
         with self._lock:
             if eid:
-                if self._conn.execute("SELECT 1 FROM events WHERE event_id = ?", (eid,)).fetchone():
+                if self._conn.execute(
+                    "SELECT 1 FROM events WHERE event_id = ?", (eid,)
+                ).fetchone():
                     return False
             elif sequence is not None:
                 if self._conn.execute(
-                    "SELECT 1 FROM events WHERE workspace = ? AND sequence = ?", (ws, sequence)
+                    "SELECT 1 FROM events WHERE workspace = ? AND sequence = ?",
+                    (ws, sequence),
                 ).fetchone():
                     return False
             self._conn.execute(
@@ -210,20 +224,35 @@ class EventStore:
                 "performative, event, proposal, verb, tier, severity, envelope) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    eid, _now(), ws, sequence, envelope.get("grant", "") or "", source,
-                    envelope.get("performative", "") or "", body.get("event", "") or "",
-                    body.get("proposal"), body.get("verb"), body.get("tier"), body.get("severity"),
+                    eid,
+                    _now(),
+                    ws,
+                    sequence,
+                    envelope.get("grant", "") or "",
+                    source,
+                    envelope.get("performative", "") or "",
+                    body.get("event", "") or "",
+                    body.get("proposal"),
+                    body.get("verb"),
+                    body.get("tier"),
+                    body.get("severity"),
                     json.dumps(envelope, ensure_ascii=False),
                 ),
             )
             self._conn.commit()
         return True
 
-    def recent(self, limit: int = 100, workspace: str | None = None) -> list[dict[str, Any]]:
+    def recent(
+        self, limit: int = 100, workspace: str | None = None
+    ) -> list[dict[str, Any]]:
         # SaaS isolation: when a workspace is given, return ONLY that tenant's events. Pass None only
         # for the operator/global timeline.
         where = "WHERE workspace = ? " if workspace is not None else ""
-        params: tuple[Any, ...] = (workspace, max(1, min(limit, 1000))) if workspace is not None else (max(1, min(limit, 1000)),)
+        params: tuple[Any, ...] = (
+            (workspace, max(1, min(limit, 1000)))
+            if workspace is not None
+            else (max(1, min(limit, 1000)),)
+        )
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, received_at, workspace, sequence, grant_id, source, performative, "
@@ -247,11 +276,14 @@ class EventStore:
             for pr in prows:
                 prev: Any = {}
                 try:
-                    prev = (json.loads(pr["envelope"]).get("body") or {}).get("preview") or {}
+                    prev = (json.loads(pr["envelope"]).get("body") or {}).get(
+                        "preview"
+                    ) or {}
                 except (ValueError, TypeError):
                     prev = {}
                 proposed[pr["proposal"]] = {
-                    "verb": pr["verb"], "tier": pr["tier"],
+                    "verb": pr["verb"],
+                    "tier": pr["tier"],
                     "summary": prev.get("en") if isinstance(prev, dict) else None,
                 }
         out: list[dict[str, Any]] = []
@@ -277,7 +309,9 @@ class EventStore:
             # so fall back to the result's entity type; and surface the backend + the affected entity
             # and a human one-liner so each row says WHAT happened, not just that something did.
             from_proposed = proposed.get(record.get("proposal") or "") or {}
-            record["verb"] = record.get("verb") or from_proposed.get("verb") or entity.get("type")
+            record["verb"] = (
+                record.get("verb") or from_proposed.get("verb") or entity.get("type")
+            )
             record["tier"] = record.get("tier") or from_proposed.get("tier")
             record["system"] = ssot.get("system")
             record["entity_id"] = entity.get("id")
@@ -285,10 +319,14 @@ class EventStore:
             # Human one-liner, best→worst: this event's own preview, the proposal's preview (has the
             # name/value), else the affected entity path.
             preview = body.get("preview") or {}
-            summary = (preview.get("en") if isinstance(preview, dict) else None) or from_proposed.get("summary")
+            summary = (
+                preview.get("en") if isinstance(preview, dict) else None
+            ) or from_proposed.get("summary")
             if not summary and entity:
                 eid = entity.get("id")
-                summary = f"{entity.get('url') or entity.get('type') or ''}".strip("/") or (str(eid) if eid else None)
+                summary = f"{entity.get('url') or entity.get('type') or ''}".strip(
+                    "/"
+                ) or (str(eid) if eid else None)
             record["summary"] = summary
             record["args"] = body.get("args") or None
             # The headline column: did the intent actually land in the SSOT, field for field?
@@ -328,10 +366,14 @@ class EventStore:
                 pbody = _loads(pr["envelope"]).get("body") or {}
                 if pr["event"] == "proposed" and not proposed_body:
                     proposed_body = pbody
-                journey.append({
-                    "id": pr["id"], "event": pr["event"], "received_at": pr["received_at"],
-                    "replayed": pbody.get("replayed"),
-                })
+                journey.append(
+                    {
+                        "id": pr["id"],
+                        "event": pr["event"],
+                        "received_at": pr["received_at"],
+                        "replayed": pbody.get("replayed"),
+                    }
+                )
         resolved = proposed_body.get("resolved") or {}
         ssot = result.get("ssot") or {}
         # Field-level diff: prefer the adapter's emitted before→after read-back (the real prior value,
@@ -341,8 +383,13 @@ class EventStore:
         emitted = ssot.get("fields")
         if emitted:
             fields = [
-                {"field": f.get("field"), "before": f.get("before"), "requested": f.get("requested"),
-                 "after": f.get("after"), "verified": bool(f.get("verified"))}
+                {
+                    "field": f.get("field"),
+                    "before": f.get("before"),
+                    "requested": f.get("requested"),
+                    "after": f.get("after"),
+                    "verified": bool(f.get("verified")),
+                }
                 for f in emitted
             ]
         else:
@@ -353,8 +400,12 @@ class EventStore:
             ]
         code = body.get("code")
         return {
-            "id": row["id"], "received_at": row["received_at"], "workspace": row["workspace"],
-            "grant_id": row["grant_id"], "source": row["source"], "event": row["event"],
+            "id": row["id"],
+            "received_at": row["received_at"],
+            "workspace": row["workspace"],
+            "grant_id": row["grant_id"],
+            "source": row["source"],
+            "event": row["event"],
             "verb": row["verb"] or proposed_body.get("verb"),
             "tier": row["tier"] or proposed_body.get("tier"),
             "verify": _verify_status(row["event"], result),
@@ -363,8 +414,13 @@ class EventStore:
             "resolved": resolved,
             "ignored": proposed_body.get("ignored") or None,
             "expires_at": proposed_body.get("expires_at"),
-            "refusal": {"code": code, "message": body.get("message"), "field": body.get("field")}
-            if code else None,
+            "refusal": {
+                "code": code,
+                "message": body.get("message"),
+                "field": body.get("field"),
+            }
+            if code
+            else None,
             "result": result or None,
             "fields": fields,
             "journey": journey,
@@ -373,7 +429,9 @@ class EventStore:
 
     def count(self) -> int:
         with self._lock:
-            return int(self._conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"])
+            return int(
+                self._conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+            )
 
     def adapters(self, limit: int = 800) -> list[dict[str, Any]]:
         """The distinct adapters/backends active in the timeline, derived purely from the audit log
@@ -396,7 +454,7 @@ class EventStore:
             try:
                 body = json.loads(rec["envelope"]).get("body") or {}
                 proposal = body.get("proposal")
-                system = (((body.get("result") or {}).get("ssot") or {}).get("system"))
+                system = ((body.get("result") or {}).get("ssot") or {}).get("system")
             except (ValueError, TypeError):
                 pass
             if proposal and system:
@@ -408,10 +466,18 @@ class EventStore:
             system = rec["_system"] or proposal_system.get(rec["_proposal"])
             source = rec.get("source") or "?"
             key = system or source
-            entry = agg.setdefault(key, {
-                "adapter": key, "system": system, "sources": set(), "events": 0,
-                "last_seen": rec["received_at"], "by_event": {}, "namespaces": set(),
-            })
+            entry = agg.setdefault(
+                key,
+                {
+                    "adapter": key,
+                    "system": system,
+                    "sources": set(),
+                    "events": 0,
+                    "last_seen": rec["received_at"],
+                    "by_event": {},
+                    "namespaces": set(),
+                },
+            )
             entry["events"] += 1
             entry["sources"].add(source)
             if system and not entry["system"]:
@@ -424,7 +490,11 @@ class EventStore:
             if rec["received_at"] > entry["last_seen"]:
                 entry["last_seen"] = rec["received_at"]
         out = [
-            {**e, "sources": sorted(e["sources"]), "namespaces": sorted(e["namespaces"])}
+            {
+                **e,
+                "sources": sorted(e["sources"]),
+                "namespaces": sorted(e["namespaces"]),
+            }
             for e in agg.values()
         ]
         out.sort(key=lambda e: e["last_seen"], reverse=True)
@@ -443,13 +513,19 @@ class EventStore:
             return {"verb": None, "tier": None, "preview": None}
         preview = None
         try:
-            preview = json.dumps((json.loads(row["envelope"]).get("body") or {}).get("preview"))
+            preview = json.dumps(
+                (json.loads(row["envelope"]).get("body") or {}).get("preview")
+            )
         except (ValueError, TypeError):
             preview = None
         return {"verb": row["verb"], "tier": row["tier"], "preview": preview}
 
     def await_approval(
-        self, proposal_id: str, *, verb: str | None = None, tier: str | None = None,
+        self,
+        proposal_id: str,
+        *,
+        verb: str | None = None,
+        tier: str | None = None,
         preview: Any = None,
     ) -> dict[str, Any]:
         """Register a proposal as awaiting human approval (idempotent — keeps an existing decision).
@@ -465,13 +541,20 @@ class EventStore:
                 return {"proposal_id": proposal_id, "status": existing["status"]}
             meta = self._enrich(proposal_id)
             preview_str = (
-                json.dumps(preview) if isinstance(preview, (dict, list))
+                json.dumps(preview)
+                if isinstance(preview, (dict, list))
                 else (preview if preview is not None else meta["preview"])
             )
             self._conn.execute(
                 "INSERT INTO approvals (proposal_id, status, verb, tier, preview, created_at) "
                 "VALUES (?, 'pending', ?, ?, ?, ?)",
-                (proposal_id, verb or meta["verb"], tier or meta["tier"], preview_str, _now()),
+                (
+                    proposal_id,
+                    verb or meta["verb"],
+                    tier or meta["tier"],
+                    preview_str,
+                    _now(),
+                ),
             )
             self._conn.commit()
         return {"proposal_id": proposal_id, "status": "pending"}
@@ -484,7 +567,9 @@ class EventStore:
             ).fetchone()
         return row["status"] if row is not None else "unknown"
 
-    def decide(self, proposal_id: str, status: str, *, actor: str = "", reason: str = "") -> bool:
+    def decide(
+        self, proposal_id: str, status: str, *, actor: str = "", reason: str = ""
+    ) -> bool:
         """Owner decision. Only transitions a 'pending' row; returns False otherwise (idempotent/guarded)."""
         if status not in ("approved", "rejected"):
             raise ValueError("status must be 'approved' or 'rejected'")
@@ -502,13 +587,17 @@ class EventStore:
         # so scope by JOINing each held proposal to its `proposed` event's workspace. A tenant sees only
         # its own held proposals; None = operator/global view.
         if workspace is None:
-            sql = ("SELECT proposal_id, verb, tier, preview, created_at FROM approvals "
-                   "WHERE status = 'pending' ORDER BY created_at DESC")
+            sql = (
+                "SELECT proposal_id, verb, tier, preview, created_at FROM approvals "
+                "WHERE status = 'pending' ORDER BY created_at DESC"
+            )
             params: tuple[Any, ...] = ()
         else:
-            sql = ("SELECT a.proposal_id, a.verb, a.tier, a.preview, a.created_at FROM approvals a "
-                   "WHERE a.status = 'pending' AND EXISTS (SELECT 1 FROM events e "
-                   "WHERE e.proposal = a.proposal_id AND e.workspace = ?) ORDER BY a.created_at DESC")
+            sql = (
+                "SELECT a.proposal_id, a.verb, a.tier, a.preview, a.created_at FROM approvals a "
+                "WHERE a.status = 'pending' AND EXISTS (SELECT 1 FROM events e "
+                "WHERE e.proposal = a.proposal_id AND e.workspace = ?) ORDER BY a.created_at DESC"
+            )
             params = (workspace,)
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
@@ -516,8 +605,14 @@ class EventStore:
 
     # ── active-adapter registry (multi-tenant routing) ───────────────────────────────────────
     def register_adapter(
-        self, workspace: str, adapter_id: str, *,
-        label: str = "", url: str, bearer: str = "", system: str = "",
+        self,
+        workspace: str,
+        adapter_id: str,
+        *,
+        label: str = "",
+        url: str,
+        bearer: str = "",
+        system: str = "",
     ) -> dict[str, Any]:
         """Upsert an adapter the MCP can route to. Re-registering updates its coordinates but
         PRESERVES the active flag (so refreshing a bearer doesn't silently flip routing off)."""
@@ -542,7 +637,9 @@ class EventStore:
         """Save (replace) a workspace's secret bundle, ENCRYPTED. Raises if the vault is unconfigured —
         the platform never stores a tenant's creds in plaintext as a fallback."""
         if self._vault is None:
-            raise RuntimeError("secret vault disabled — set NIL_VAULT_KEY to store tenant secrets")
+            raise RuntimeError(
+                "secret vault disabled — set NIL_VAULT_KEY to store tenant secrets"
+            )
         if not workspace:
             raise ValueError("workspace is required")
         blob = self._vault._fernet.encrypt(  # encrypt here, persist ciphertext (vault store is the DB)
@@ -563,11 +660,14 @@ class EventStore:
             return None
         with self._lock:
             row = self._conn.execute(
-                "SELECT ciphertext FROM tenant_secrets WHERE workspace = ?", (workspace,)
+                "SELECT ciphertext FROM tenant_secrets WHERE workspace = ?",
+                (workspace,),
             ).fetchone()
         if row is None:
             return None
-        return json.loads(self._vault._fernet.decrypt(row["ciphertext"]).decode("utf-8"))
+        return json.loads(
+            self._vault._fernet.decrypt(row["ciphertext"]).decode("utf-8")
+        )
 
     def get_secret(self, workspace: str, name: str) -> Any | None:
         bundle = self.get_secrets(workspace)
@@ -575,7 +675,9 @@ class EventStore:
 
     def delete_secrets(self, workspace: str) -> None:
         with self._lock:
-            self._conn.execute("DELETE FROM tenant_secrets WHERE workspace = ?", (workspace,))
+            self._conn.execute(
+                "DELETE FROM tenant_secrets WHERE workspace = ?", (workspace,)
+            )
             self._conn.commit()
 
     def activate_adapter(self, workspace: str, adapter_id: str) -> bool:
@@ -596,7 +698,9 @@ class EventStore:
             self._conn.commit()
         return True
 
-    def set_adapter_active(self, workspace: str, adapter_id: str, enabled: bool) -> bool:
+    def set_adapter_active(
+        self, workspace: str, adapter_id: str, enabled: bool
+    ) -> bool:
         """Enable/disable ONE adapter without touching its siblings (non-exclusive). This is what lets
         a workspace have several adapters active at once — e.g. PocketBase + Odoo for a cross-system
         automation. Returns False if no such adapter is registered."""
@@ -629,6 +733,16 @@ class EventStore:
                 f"SELECT {_ADAPTER_COLS} FROM adapters WHERE active = 1 ORDER BY updated_at DESC LIMIT 1"
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def proposal_workspace(self, proposal_id: str) -> str | None:
+        """Derive the workspace for a proposal_id from its 'proposed' event. Returns None when no
+        matching event exists (unknown proposal or event not yet ingested)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT workspace FROM events WHERE proposal = ? AND event = 'proposed' ORDER BY id DESC LIMIT 1",
+                (proposal_id,),
+            ).fetchone()
+        return row["workspace"] if row is not None else None
 
     def approval(self, proposal_id: str) -> dict[str, Any] | None:
         """The full approval row (verb/tier/preview/status) — the executor reads the verb to scope the
@@ -666,7 +780,11 @@ class EventStore:
         rec["name"] = _loads(rec.get("name"))
         rec["plan"] = _loads(rec.get("plan"))
         rec["trigger"] = _loads(rec.get("trigger"))
-        rec["description"] = _loads(rec["description"]) if rec.get("description") else None
+        rec["description"] = (
+            _loads(rec["description"]) if rec.get("description") else None
+        )
+        # `source` is the canonical Cycle AST for kind='cycle'; None for plain automations.
+        rec["source"] = _loads(rec["source"]) if rec.get("source") else None
         return rec
 
     def register_automation(
@@ -683,6 +801,7 @@ class EventStore:
         authored_by: str = "",
         description: dict[str, Any] | None = None,
         approved_by: str | None = None,
+        source: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Append a new version. Re-registering an identical plan (same `content_hash` as the latest
         version) is an idempotent no-op — returns the existing row, no new version. Otherwise the
@@ -709,15 +828,25 @@ class EventStore:
                 )
             self._conn.execute(
                 "INSERT INTO automations (workspace, automation_id, version, content_hash, kind, name, "
-                "description, plan, trigger, state, authored_by, approved_by, created_at, superseded_by) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                "description, plan, source, trigger, state, authored_by, approved_by, created_at, superseded_by) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
                 (
-                    workspace, automation_id, version, content_hash, kind,
+                    workspace,
+                    automation_id,
+                    version,
+                    content_hash,
+                    kind,
                     json.dumps(name, ensure_ascii=False),
-                    json.dumps(description, ensure_ascii=False) if description is not None else None,
+                    json.dumps(description, ensure_ascii=False)
+                    if description is not None
+                    else None,
                     json.dumps(plan, ensure_ascii=False),
+                    json.dumps(source, ensure_ascii=False) if source is not None else None,
                     json.dumps(trigger, ensure_ascii=False),
-                    state, authored_by, approved_by, _now(),
+                    state,
+                    authored_by,
+                    approved_by,
+                    _now(),
                 ),
             )
             self._conn.commit()
@@ -809,7 +938,13 @@ class EventStore:
 
     # ── automation runs (P2 dispatcher) ──────────────────────────────────────────────────────
     def start_run(
-        self, run_id: str, *, workspace: str, automation_id: str, version: int, content_hash: str,
+        self,
+        run_id: str,
+        *,
+        workspace: str,
+        automation_id: str,
+        version: int,
+        content_hash: str,
         fired_by: str = "",
     ) -> bool:
         """Open a run row (state=running). Returns False if `run_id` already exists — the caller must
@@ -822,7 +957,15 @@ class EventStore:
             self._conn.execute(
                 "INSERT INTO automation_runs (run_id, workspace, automation_id, version, "
                 "content_hash, fired_by, state, started_at) VALUES (?,?,?,?,?,?, 'running', ?)",
-                (run_id, workspace, automation_id, version, content_hash, fired_by, _now()),
+                (
+                    run_id,
+                    workspace,
+                    automation_id,
+                    version,
+                    content_hash,
+                    fired_by,
+                    _now(),
+                ),
             )
             self._conn.commit()
         return True
@@ -832,8 +975,14 @@ class EventStore:
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE automation_runs SET state = ?, trace = ?, ended_at = ? WHERE run_id = ?",
-                (state, json.dumps(trace, ensure_ascii=False) if trace is not None else None,
-                 _now(), run_id),
+                (
+                    state,
+                    json.dumps(trace, ensure_ascii=False)
+                    if trace is not None
+                    else None,
+                    _now(),
+                    run_id,
+                ),
             )
             self._conn.commit()
             return cur.rowcount > 0
@@ -851,7 +1000,9 @@ class EventStore:
         rec["trace"] = _loads(rec.get("trace")) if rec.get("trace") else None
         return rec
 
-    def list_runs(self, workspace: str, automation_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    def list_runs(
+        self, workspace: str, automation_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
         """Newest-first run history for one automation (trace omitted — fetch via get_run)."""
         with self._lock:
             rows = self._conn.execute(

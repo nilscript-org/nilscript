@@ -7,6 +7,12 @@ Execution, ontology, docs, and governance are all projections of this one object
 
 from __future__ import annotations
 
+from nilscript.cycle.authoring import (
+    CycleDraftResult,
+    cycle_slug,
+    draft_cycle,
+    register_cycle,
+)
 from nilscript.cycle.compile import CompileResult, compile_cycle
 from nilscript.cycle.hash import cycle_content_hash
 from nilscript.cycle.models import (
@@ -30,4 +36,8 @@ __all__ = [
     "CompileResult",
     "compile_cycle",
     "cycle_content_hash",
+    "CycleDraftResult",
+    "cycle_slug",
+    "draft_cycle",
+    "register_cycle",
 ]
