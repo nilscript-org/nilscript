@@ -36,24 +36,24 @@ def _ctx() -> ValidationContext:
 
 def _cycle(*, opportunity_verb: str = "crm.create_opportunity") -> dict:
     return {
-        "nil": "cycle/0.1",
+        "nil": "cycle/0.2",
         "cycle_id": "SalesLeadLifecycle",
         "workspace": "acme",
-        "metadata": {"version": "1.0", "owner": "Sales"},
+        "metadata": {"version": "1.0", "owner": "Sales", "tags": ["sales"]},
         "intent": {"ar": "دورة حياة العميل المحتمل", "en": "Lead lifecycle"},
         "trigger": {"type": "manual"},
         "flow": {
-            "entry": "step_1",
-            "nodes": [
-                {"id": "step_1", "type": "action", "skill": "crm", "verb": "crm.create_lead",
-                 "args": {"name": "Acme"}, "next": "step_2"},
-                {"id": "step_2", "type": "action", "skill": "crm", "verb": "crm.log_note",
-                 "args": {"note": "lead created"}, "next": "step_3"},
-                {"id": "step_3", "type": "condition", "expression": "true",
-                 "on_true": "step_4", "on_false": "step_5"},
-                {"id": "step_4", "type": "action", "skill": "crm", "verb": opportunity_verb,
-                 "args": {"name": "Acme"}, "next": "step_5"},
-                {"id": "step_5", "type": "notify", "message": {"ar": "تم", "en": "Done"}},
+            "entry": "CreateLead",
+            "steps": [
+                {"id": "CreateLead", "type": "action", "use": "crm.create_lead",
+                 "with": {"name": "Acme"}, "output": "lead", "next": "LogNote"},
+                {"id": "LogNote", "type": "action", "use": "crm.log_note",
+                 "with": {"note": "lead created"}, "next": "Qualify"},
+                {"id": "Qualify", "type": "decision", "when": "true",
+                 "on_true": "CreateOpportunity", "on_false": "Done"},
+                {"id": "CreateOpportunity", "type": "action", "use": opportunity_verb,
+                 "with": {"lead_id": "lead.id"}, "next": "Done"},
+                {"id": "Done", "type": "notify", "message": {"ar": "تم", "en": "Done"}},
             ],
         },
     }
@@ -94,7 +94,7 @@ def test_register_cycle_persists_with_kind_and_source(store):
     assert row["state"] == "pending_approval"  # never auto-armed
     # the canonical Cycle AST is preserved verbatim in `source`...
     assert row["source"]["cycle_id"] == "SalesLeadLifecycle"
-    assert row["source"]["nil"] == "cycle/0.1"
+    assert row["source"]["nil"] == "cycle/0.2"
     # ...and the derived lowered program lives in `plan` and re-validates as a real program.
     WosoolProgram.model_validate(row["plan"])
 

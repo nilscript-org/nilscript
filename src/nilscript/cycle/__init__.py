@@ -16,13 +16,19 @@ from nilscript.cycle.authoring import (
 from nilscript.cycle.compile import CompileResult, compile_cycle
 from nilscript.cycle.hash import cycle_content_hash
 from nilscript.cycle.models import (
+    ActionStep,
+    ApprovalStep,
     Cycle,
     CycleMetadata,
+    DecisionStep,
     EntityRef,
     Flow,
+    NotifyStep,
     Outcome,
     PolicyRef,
+    QueryStep,
     RoleRef,
+    VariableBinding,
 )
 
 __all__ = [
@@ -33,6 +39,12 @@ __all__ = [
     "Outcome",
     "PolicyRef",
     "RoleRef",
+    "VariableBinding",
+    "ActionStep",
+    "QueryStep",
+    "DecisionStep",
+    "ApprovalStep",
+    "NotifyStep",
     "CompileResult",
     "compile_cycle",
     "cycle_content_hash",
