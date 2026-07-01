@@ -311,6 +311,8 @@ def create_app(
             tier=body.get("tier"),
             preview=body.get("preview"),
             workspace=body.get("workspace") or "",
+            resolved=body.get("resolved"),
+            modifiable=body.get("modifiable"),
         )
 
     @app.get("/proposals/{proposal_id}/decision")
@@ -318,12 +320,18 @@ def create_app(
         """Polled by the gate before it commits a held proposal."""
         return {"proposal_id": proposal_id, "status": store.decision(proposal_id)}
 
-    async def _execute_approved(proposal_id: str) -> dict[str, Any]:
+    async def _execute_approved(
+        proposal_id: str, edits: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """The owner approved a HELD proposal → the CONTROL PLANE commits it against the active adapter.
         This is the SSOT keystone: approval DRIVES execution (the agent never re-commits), so an approve
         click actually performs the deletion/effect. Reuses the `_live_runner` client pattern; the
         proposal detail (verb) rides on the approval row (threaded at hold-time), so no MCP memory is
-        needed — survives MCP restarts. Honest on failure (expired / already committed / unreachable)."""
+        needed — survives MCP restarts. Honest on failure (expired / already committed / unreachable).
+
+        If the owner EDITED the fields on the decision card, `edits` holds the full amended args. We
+        re-PROPOSE those against the adapter (a fresh preview + id) and commit THAT — so the commit
+        still executes exactly what was previewed. The NIL invariant holds even under a human tweak."""
         appr = store.approval(proposal_id) or {}
         ws = store.proposal_workspace(proposal_id) or ""
         active = store.active_adapter(ws) if ws else store.any_active_adapter()
@@ -341,10 +349,28 @@ def create_app(
         )
         client = NilClient(transport=transport, grant=grant)
         try:
-            key = commit_idempotency_key(f"cp-approve:{proposal_id}", proposal_id)
-            outcome = await client.commit(proposal_id, idempotency_key=key)
+            commit_id = proposal_id
+            edited = False
+            if edits and verb:
+                # amended args → re-propose (fresh dry-run + preview), then commit the NEW proposal.
+                reproposed = await client.propose(
+                    verb,
+                    edits,
+                    session_id=f"cp-approve:{proposal_id}",
+                    request_timestamp=_dt.datetime.now(_dt.UTC),
+                )
+                if reproposed.is_refusal or not reproposed.id:
+                    return {
+                        "executed": False,
+                        "error": "edited args rejected at re-propose: "
+                        f"{reproposed.code or 'refused'} {reproposed.message or ''}".strip(),
+                    }
+                commit_id, edited = reproposed.id, True
+            key = commit_idempotency_key(f"cp-approve:{commit_id}", commit_id)
+            outcome = await client.commit(commit_id, idempotency_key=key)
             return {
                 "executed": True,
+                "edited": edited,
                 "outcome": outcome.model_dump(mode="json", exclude_none=True),
             }
         except Exception as exc:  # noqa: BLE001 — adapter unreachable / proposal expired / already done
@@ -378,7 +404,8 @@ def create_app(
             "status": store.decision(proposal_id),
         }
         if ok and status == "approved":
-            result["execution"] = await _execute_approved(proposal_id)
+            edits = body.get("edits") if isinstance(body.get("edits"), dict) else None
+            result["execution"] = await _execute_approved(proposal_id, edits)
         return result
 
     @app.get("/api/pending")

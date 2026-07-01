@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import os
 
-from odoo_crm_nil_adapter.edge import CapturingEmitter, HttpEventEmitter, create_app
-from odoo_crm_nil_adapter.system import RealSystemClient
+from odoo_nil_adapter.edge import CapturingEmitter, HttpEventEmitter, create_app
+from odoo_nil_adapter.system import RealSystemClient
 
 ODOO_URL = os.environ.get("ODOO_URL", "")
 ODOO_DB = os.environ.get("ODOO_DB", "")

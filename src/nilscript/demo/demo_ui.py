@@ -607,7 +607,7 @@ def verify_odoo(creds: dict[str, str]) -> tuple[bool, str]:
     if not all(creds.get(k) for k in ("url", "db", "login", "api_key")):
         return False, "fill url, database, login, and api key"
     try:
-        from odoo_crm_nil_adapter.system import RealSystemClient
+        from odoo_nil_adapter.system import RealSystemClient
     except ModuleNotFoundError:
         return False, "Odoo adapter not installed in this build"
     try:

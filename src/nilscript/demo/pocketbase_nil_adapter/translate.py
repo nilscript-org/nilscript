@@ -17,7 +17,7 @@ first required arg. Reversal (ROLLBACK) lives in compensation.py.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from pocketbase_nil_adapter.system import SystemClient
@@ -34,6 +34,10 @@ class WriteVerb:
     to_native: Callable[[dict[str, Any]], dict[str, Any]]
     preview: Callable[[dict[str, Any]], Bilingual]
     entity_type: str
+    # DECLARED prerequisites: each field here points to a record in another target (a foreign key).
+    # The edge verifies the referenced record EXISTS before proposing — so "an invoice needs a client"
+    # is a fact the adapter states, enforced universally, not a PocketBase-specific afterthought.
+    references: dict[str, str] = field(default_factory=dict)
 
     def missing(self, args: dict[str, Any]) -> list[str]:
         return [field for field in self.required if not args.get(field)]
@@ -155,10 +159,12 @@ WRITE_VERBS: dict[str, WriteVerb] = {
         _pv("إضافة عميل «{name}»", "Add client “{name}”"), "create_client"),
     "services.create_invoice": WriteVerb("services.create_invoice", "HIGH", "invoices",
         ("party_id", "amount", "currency"), _to_native_create_invoice,
-        _pv("فاتورة بمبلغ {amount} {currency} للعميل {party_id}", "Invoice {amount} {currency} for {party_id}"), "create_invoice"),
+        _pv("فاتورة بمبلغ {amount} {currency} للعميل {party_id}", "Invoice {amount} {currency} for {party_id}"), "create_invoice",
+        references={"party_id": "clients"}),  # an invoice needs an existing client
     "services.create_payment_link": WriteVerb("services.create_payment_link", "HIGH", "payment_links",
         ("invoice_id",), _to_native_create_payment_link,
-        _pv("رابط دفع للفاتورة {invoice_id}", "Payment link for invoice {invoice_id}"), "create_payment_link"),
+        _pv("رابط دفع للفاتورة {invoice_id}", "Payment link for invoice {invoice_id}"), "create_payment_link",
+        references={"invoice_id": "invoices"}),  # a payment link needs an existing invoice
     "services.draft_proposal": WriteVerb("services.draft_proposal", "MEDIUM", "proposals",
         ("party_id", "title", "amount", "currency"), _to_native_draft_proposal,
         _pv("مسودة عرض «{title}»", "Draft proposal “{title}”"), "draft_proposal"),

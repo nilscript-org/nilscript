@@ -207,6 +207,14 @@ class EventStore:
                 )
             except sqlite3.OperationalError:
                 pass  # column already present
+            for col in ("resolved", "modifiable"):
+                try:
+                    # Editable decision cards: the gate records the proposal's resolved field values
+                    # and which are editable, so the owner's card is a filled-in form and an
+                    # approve-with-edits can re-propose exactly the tweaked args before commit.
+                    self._conn.execute(f"ALTER TABLE approvals ADD COLUMN {col} TEXT")
+                except sqlite3.OperationalError:
+                    pass  # column already present
             self._conn.commit()
 
     def ingest(
@@ -540,12 +548,15 @@ class EventStore:
         tier: str | None = None,
         preview: Any = None,
         workspace: str = "",
+        resolved: Any = None,
+        modifiable: Any = None,
     ) -> dict[str, Any]:
         """Register a proposal as awaiting human approval (idempotent — keeps an existing decision).
 
         `verb`/`tier`/`preview` are passed by the gate at hold-time (a held proposal has no ledger
         event yet, so `_enrich` finds nothing). They win over enrichment; `preview` (a dict) is stored
-        as JSON so the owner's Decisions screen can show exactly what the proposal does."""
+        as JSON so the owner's Decisions screen can show exactly what the proposal does. `resolved`
+        (the field values) + `modifiable` (which keys are editable) drive the editable decision card."""
         with self._lock:
             existing = self._conn.execute(
                 "SELECT status FROM approvals WHERE proposal_id = ?", (proposal_id,)
@@ -559,14 +570,17 @@ class EventStore:
                 else (preview if preview is not None else meta["preview"])
             )
             self._conn.execute(
-                "INSERT INTO approvals (proposal_id, status, workspace, verb, tier, preview, created_at) "
-                "VALUES (?, 'pending', ?, ?, ?, ?, ?)",
+                "INSERT INTO approvals "
+                "(proposal_id, status, workspace, verb, tier, preview, resolved, modifiable, created_at) "
+                "VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
                 (
                     proposal_id,
                     workspace or "",
                     verb or meta["verb"],
                     tier or meta["tier"],
                     preview_str,
+                    json.dumps(resolved) if resolved is not None else None,
+                    json.dumps(list(modifiable)) if modifiable is not None else None,
                     _now(),
                 ),
             )
@@ -601,15 +615,16 @@ class EventStore:
         # gate at hold-time, so a tenant sees only its holds by a DIRECT column filter — no fragile
         # join to the ledger by proposal_id. The legacy events-join is kept ONLY as a fallback for
         # pre-migration rows whose workspace is still ''. None = operator/global view.
+        cols = "proposal_id, verb, tier, preview, resolved, modifiable, created_at"
         if workspace is None:
             sql = (
-                "SELECT proposal_id, verb, tier, preview, created_at FROM approvals "
+                f"SELECT {cols} FROM approvals "
                 "WHERE status = 'pending' ORDER BY created_at DESC"
             )
             params: tuple[Any, ...] = ()
         else:
             sql = (
-                "SELECT a.proposal_id, a.verb, a.tier, a.preview, a.created_at FROM approvals a "
+                f"SELECT {cols} FROM approvals a "
                 "WHERE a.status = 'pending' AND ("
                 "  a.workspace = ?"
                 "  OR (a.workspace = '' AND EXISTS (SELECT 1 FROM events e "
@@ -619,7 +634,20 @@ class EventStore:
             params = (workspace, workspace)
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        return [self._shape_pending(r) for r in rows]
+
+    @staticmethod
+    def _shape_pending(row: Any) -> dict[str, Any]:
+        """Decode a pending row, exposing `resolved`/`modifiable` as real JSON for the editable card."""
+        rec = dict(row)
+        for key in ("resolved", "modifiable"):
+            raw = rec.get(key)
+            if isinstance(raw, str) and raw:
+                try:
+                    rec[key] = json.loads(raw)
+                except json.JSONDecodeError:
+                    rec[key] = None
+        return rec
 
     # ── active-adapter registry (multi-tenant routing) ───────────────────────────────────────
     def register_adapter(
@@ -767,10 +795,11 @@ class EventStore:
         control-plane grant when it commits the approved proposal."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT proposal_id, status, verb, tier, preview FROM approvals WHERE proposal_id = ?",
+                "SELECT proposal_id, status, verb, tier, preview, resolved, modifiable "
+                "FROM approvals WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
-        return dict(row) if row is not None else None
+        return self._shape_pending(row) if row is not None else None
 
     def list_adapters(self, workspace: str) -> list[dict[str, Any]]:
         """All registered adapters for a workspace (active first, then most-recent). Carries the

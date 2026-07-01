@@ -69,8 +69,13 @@ def build_tools(
     transport = NilTransport(base_url=adapter_url, bearer_secret=bearer)
     client = NilClient(transport=transport, grant=grant)
     return NilTools(
-        client, transport, session_id=session_id, gate=gate,
-        brain=brain, automation=automation, workspace=workspace,
+        client,
+        transport,
+        session_id=session_id,
+        gate=gate,
+        brain=brain,
+        automation=automation,
+        workspace=workspace,
     )
 
 
@@ -125,9 +130,13 @@ class TenantToolsProvider(ToolsProvider):
         if cached is not None:
             return cached
         tenant = resolve_tenant(
-            ctx, default=self._default, multi_tenant=True,
-            allow_insecure=self._allow_insecure, registry=self._registry,
-            saas=self._saas, claim_resolver=self._claim_resolver,
+            ctx,
+            default=self._default,
+            multi_tenant=True,
+            allow_insecure=self._allow_insecure,
+            registry=self._registry,
+            saas=self._saas,
+            claim_resolver=self._claim_resolver,
         )
         tools = build_tools(
             adapter_url=tenant.adapter_url,
@@ -179,12 +188,17 @@ def build_server(
             allowed_origins=["*"],
         )
     server = FastMCP(
-        name, instructions=_INSTRUCTIONS, host=host, port=port,
+        name,
+        instructions=_INSTRUCTIONS,
+        host=host,
+        port=port,
         transport_security=transport_security,
     )
 
     single = _single_surface()  # nil_intent subsumes reads/graph/automation when on
-    provider = tools_provider if tools_provider is not None else SingletonToolsProvider(tools)
+    provider = (
+        tools_provider if tools_provider is not None else SingletonToolsProvider(tools)
+    )
     _register_tools(server, provider, single_surface=single)
     if dynamic_verbs and not single:
         from nilscript.mcp.dynamic import register_dynamic_tools
@@ -204,58 +218,77 @@ def _register_automation_tools(server: Any, auto: Any) -> None:
     run fires only an active automation)."""
 
     async def nil_automation_draft(
-        automation_id: str, name: dict[str, Any], plan: dict[str, Any], trigger: dict[str, Any],
+        automation_id: str,
+        name: dict[str, Any],
+        plan: dict[str, Any],
+        trigger: dict[str, Any],
     ) -> dict[str, Any]:
         return await auto.draft(automation_id, name, plan, trigger)
 
     async def nil_automation_register(
-        automation_id: str, name: dict[str, Any], plan: dict[str, Any], trigger: dict[str, Any],
+        automation_id: str,
+        name: dict[str, Any],
+        plan: dict[str, Any],
+        trigger: dict[str, Any],
     ) -> dict[str, Any]:
         return await auto.register(automation_id, name, plan, trigger)
 
     async def nil_automation_compose_register(
-        automation_id: str, name: dict[str, Any], composed: dict[str, Any], trigger: dict[str, Any],
+        automation_id: str,
+        name: dict[str, Any],
+        composed: dict[str, Any],
+        trigger: dict[str, Any],
     ) -> dict[str, Any]:
         return await auto.compose_register(automation_id, name, composed, trigger)
 
-    async def nil_automation_approve(workspace: str, automation_id: str, version: int) -> dict[str, Any]:
+    async def nil_automation_approve(
+        workspace: str, automation_id: str, version: int
+    ) -> dict[str, Any]:
         return await auto.approve(workspace, automation_id, version)
 
-    async def nil_automation_run(workspace: str, automation_id: str, idempotency_key: str) -> dict[str, Any]:
+    async def nil_automation_run(
+        workspace: str, automation_id: str, idempotency_key: str
+    ) -> dict[str, Any]:
         return await auto.run(workspace, automation_id, idempotency_key)
 
     async def nil_automation_list(workspace: str) -> dict[str, Any]:
         return await auto.list(workspace)
 
     server.add_tool(
-        nil_automation_draft, name="nil_automation_draft",
+        nil_automation_draft,
+        name="nil_automation_draft",
         description="Preview a governed automation: validate a plan (a Wosool DSL program) + trigger "
         "against the live backend. NO side effect — returns the validator verdict + content hash, or a "
         "structured refusal. The deterministic code decides admission, not the agent.",
     )
     server.add_tool(
-        nil_automation_register, name="nil_automation_register",
+        nil_automation_register,
+        name="nil_automation_register",
         description="Register a validated automation into the registry as pending_approval (NOT armed). "
         "An owner approves it before it can run. Re-registering an identical plan is idempotent.",
     )
     server.add_tool(
-        nil_automation_compose_register, name="nil_automation_compose_register",
+        nil_automation_compose_register,
+        name="nil_automation_compose_register",
         description="Register a CROSS-SYSTEM automation: `composed` = {workspace, stages:[{name, "
         "adapter, plan, input_from}]}, each stage validated against ITS adapter's live skeleton. "
         "Handoffs between stages are explicit ($.stage_1.step_2.output.id → next stage's $.input.*). "
         "Lands pending_approval. Use to wire two backends (e.g. PocketBase → Odoo) into one workflow.",
     )
     server.add_tool(
-        nil_automation_approve, name="nil_automation_approve",
+        nil_automation_approve,
+        name="nil_automation_approve",
         description="Arm a registered automation (set it active) so it can fire. Operator-grade.",
     )
     server.add_tool(
-        nil_automation_run, name="nil_automation_run",
+        nil_automation_run,
+        name="nil_automation_run",
         description="Fire an ACTIVE automation now (manual trigger). Requires an idempotency_key so a "
         "re-fire replays rather than executing twice. Returns the run with its terminal state + trace.",
     )
     server.add_tool(
-        nil_automation_list, name="nil_automation_list",
+        nil_automation_list,
+        name="nil_automation_list",
         description="List a workspace's registered automations (latest version of each). No side effect.",
     )
 
@@ -265,7 +298,9 @@ def _register_brain_tools(server: Any, brain: Any) -> None:
     what's overdue" deterministically from the brain read-model — so the agent never improvises (curl,
     file search) or mistakes a graph question for a missing kernel verb. All read-only, no side effect."""
 
-    async def nil_graph(kind: str | None = None, tenant: str | None = None) -> dict[str, Any]:
+    async def nil_graph(
+        kind: str | None = None, tenant: str | None = None
+    ) -> dict[str, Any]:
         return await brain.graph(kind, tenant)
 
     async def nil_cycles(tenant: str | None = None) -> dict[str, Any]:
@@ -281,29 +316,34 @@ def _register_brain_tools(server: Any, brain: Any) -> None:
         return await brain.activity(tenant)
 
     server.add_tool(
-        nil_graph, name="nil_graph",
+        nil_graph,
+        name="nil_graph",
         description="READ the Business Graph nodes from the brain. Pass kind to filter: 'policy' (the "
         "right way to answer 'show my policies' — policies are graph nodes, NOT kernel verbs), 'entity', "
         "'role', 'flow', or 'cycle'. No side effect. Use this for any 'show me my X' structure question.",
     )
     server.add_tool(
-        nil_cycles, name="nil_cycles",
+        nil_cycles,
+        name="nil_cycles",
         description="READ the business cycles (e.g. Sales, Finance) with each cycle's goal, metrics, and "
         "members. The deterministic answer to 'show me the cycles'. No side effect.",
     )
     server.add_tool(
-        nil_overview, name="nil_overview",
+        nil_overview,
+        name="nil_overview",
         description="READ a one-glance graph summary: counts of entities, roles, policies, flows, and "
         "cycles for the workspace. No side effect.",
     )
     server.add_tool(
-        nil_instances, name="nil_instances",
+        nil_instances,
+        name="nil_instances",
         description="READ live instance tallies per entity type — totals plus derived-state counts such "
         "as overdue and awaiting_approval. The deterministic answer to 'how many invoices are overdue'. "
         "No side effect.",
     )
     server.add_tool(
-        nil_activity, name="nil_activity",
+        nil_activity,
+        name="nil_activity",
         description="READ what recently changed in the Business Graph (latest version additions/diff). "
         "The deterministic answer to 'what changed this week'. No side effect.",
     )
@@ -312,10 +352,17 @@ def _register_brain_tools(server: Any, brain: Any) -> None:
 def _single_surface() -> bool:
     """When on, nil_intent is the ONLY model-facing tool (plus describe/commit/status/rollback); the
     subsumed read/graph/automation tools are hidden. Makes the correct path the only obvious one."""
-    return os.environ.get("NIL_MCP_SINGLE_SURFACE", "") not in ("", "0", "false", "False")
+    return os.environ.get("NIL_MCP_SINGLE_SURFACE", "") not in (
+        "",
+        "0",
+        "false",
+        "False",
+    )
 
 
-def _register_tools(server: Any, provider: ToolsProvider, *, single_surface: bool = False) -> None:
+def _register_tools(
+    server: Any, provider: ToolsProvider, *, single_surface: bool = False
+) -> None:
     """Wrap each primitive with the MCP Context so the backend + per-connection session resolve from
     the connection: `provider.get(ctx)` picks the backend (one shared, or per-tenant from headers)
     and `session_key(ctx)` isolates each connection's proposal/idempotency session. `ctx` is injected
@@ -325,53 +372,97 @@ def _register_tools(server: Any, provider: ToolsProvider, *, single_surface: boo
     async def nil_describe(ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).describe()
 
-    async def nil_propose(verb: str, args: dict[str, Any] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+    async def nil_propose(
+        verb: str, args: dict[str, Any] | None = None, ctx: Context = None
+    ) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).propose(verb, args, session_id=session_key(ctx))
 
     async def nil_commit(proposal_id: str, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).commit(proposal_id, session_id=session_key(ctx))
 
-    async def nil_query(verb: str, args: dict[str, Any] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+    async def nil_query(
+        verb: str, args: dict[str, Any] | None = None, ctx: Context = None
+    ) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).query(verb, args)
 
-    async def nil_intent(about: str, where: list[dict[str, Any]] | None = None, seek: str = "all", change: dict[str, Any] | None = None, limit: int = 50, cursor: str | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
-        return await provider.get(ctx).intent(about, where, seek, change, limit, cursor, session_id=session_key(ctx))
+    async def nil_intent(
+        about: str,
+        where: list[dict[str, Any]] | None = None,
+        seek: str = "all",
+        change: dict[str, Any] | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+        ctx: Context = None,
+    ) -> dict[str, Any]:  # type: ignore[assignment]
+        return await provider.get(ctx).intent(
+            about, where, seek, change, limit, cursor, session_id=session_key(ctx)
+        )
 
-    async def nil_search(target: str, filter: list[dict[str, Any]] | None = None, fields: list[str] | None = None, limit: int = 50, cursor: str | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+    async def nil_search(
+        target: str,
+        filter: list[dict[str, Any]] | None = None,
+        fields: list[str] | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+        ctx: Context = None,
+    ) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).search(target, filter, fields, limit, cursor)
 
-    async def nil_count(target: str, filter: list[dict[str, Any]] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+    async def nil_count(
+        target: str, filter: list[dict[str, Any]] | None = None, ctx: Context = None
+    ) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).count(target, filter)
 
-    async def nil_get(target: str, id: Any, fields: list[str] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+    async def nil_get(
+        target: str, id: Any, fields: list[str] | None = None, ctx: Context = None
+    ) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).get(target, id, fields)
 
-    async def nil_aggregate(target: str, group_by: str, metrics: list[str] | None = None, filter: list[dict[str, Any]] | None = None, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+    async def nil_aggregate(
+        target: str,
+        group_by: str,
+        metrics: list[str] | None = None,
+        filter: list[dict[str, Any]] | None = None,
+        ctx: Context = None,
+    ) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).aggregate(target, group_by, metrics, filter)
 
-    async def nil_export(target: str, filter: list[dict[str, Any]] | None = None, fields: list[str] | None = None, approved: bool = False, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
+    async def nil_export(
+        target: str,
+        filter: list[dict[str, Any]] | None = None,
+        fields: list[str] | None = None,
+        approved: bool = False,
+        ctx: Context = None,
+    ) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).export(target, filter, fields, approved)
 
     async def nil_status(proposal_id: str, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
         return await provider.get(ctx).status(proposal_id)
 
-    async def nil_rollback(compensation_token: str, reason: str, ctx: Context = None) -> dict[str, Any]:  # type: ignore[assignment]
-        return await provider.get(ctx).rollback(compensation_token, reason, session_id=session_key(ctx))
+    async def nil_rollback(
+        compensation_token: str, reason: str, ctx: Context = None
+    ) -> dict[str, Any]:  # type: ignore[assignment]
+        return await provider.get(ctx).rollback(
+            compensation_token, reason, session_id=session_key(ctx)
+        )
 
     # The single-surface keepers: discovery, the one intent payload, and the governance verbs the
     # approval/reversal flow needs. Everything else is SUBSUMED by nil_intent and hidden when
     # NIL_MCP_SINGLE_SURFACE is on — so the model sees ONE obvious tool, not a menu.
     server.add_tool(
-        nil_describe, name="nil_describe",
+        nil_describe,
+        name="nil_describe",
         description="Discover the backend skeleton: the verbs and targets it actually exposes. No side effect.",
     )
     server.add_tool(
-        nil_commit, name="nil_commit",
+        nil_commit,
+        name="nil_commit",
         description="Execute a previously previewed proposal by its id. This is the ONLY tool that writes. "
         "Idempotent: re-committing the same proposal replays, it never double-writes.",
     )
     server.add_tool(
-        nil_intent, name="nil_intent",
+        nil_intent,
+        name="nil_intent",
         description="THE primary tool. Express WHAT you want as one payload — about (an entity, e.g. "
         "res.partner), where ([{attr, rel, value}] with rel ∈ is|contains|gt|gte|lt|lte|between|in), and "
         "either seek (the|all|count|summary, a read) OR change ({op:create|update|remove, set:{...}}, a "
@@ -385,11 +476,13 @@ def _register_tools(server: Any, provider: ToolsProvider, *, single_surface: boo
         "Update her phone → about='res.partner', where=[{attr:'name',rel:'contains',value:'دينا'}], change={op:'update', set:{phone:'…'}}.",
     )
     server.add_tool(
-        nil_status, name="nil_status",
+        nil_status,
+        name="nil_status",
         description="Get the status/result of a proposal by id, including its compensation handle.",
     )
     server.add_tool(
-        nil_rollback, name="nil_rollback",
+        nil_rollback,
+        name="nil_rollback",
         description="Request a governed reversal of a committed effect (compensation_token + reason: "
         "saga_unwind|owner_cancel|downstream_failed|agent_repair). Previews a compensation to commit, "
         "or refuses honestly (IRREVERSIBLE / COMPENSATION_EXPIRED). No silent write.",
@@ -397,35 +490,42 @@ def _register_tools(server: Any, provider: ToolsProvider, *, single_surface: boo
     if single_surface:
         return  # nil_intent subsumes the rest; hide them so there is ONE obvious tool
     server.add_tool(
-        nil_propose, name="nil_propose",
+        nil_propose,
+        name="nil_propose",
         description="Preview an intent (verb + args). NO side effect: returns a preview + tier, or a refusal.",
     )
     server.add_tool(
-        nil_query, name="nil_query",
+        nil_query,
+        name="nil_query",
         description="Read live business truth (verb + args). No side effect.",
     )
     server.add_tool(
-        nil_search, name="nil_search",
+        nil_search,
+        name="nil_search",
         description="Lean, FILTERED, PAGINATED read of a target (filter=[{field,op,value}], small fields=, "
         "limit, cursor). Returns {items:[{id,…projected}], next_cursor} — never whole records, never "
         "unbounded; an over-cap page is REFUSED (narrow the filter or use nil_export), never truncated.",
     )
     server.add_tool(
-        nil_count, name="nil_count",
+        nil_count,
+        name="nil_count",
         description="Just {count} for a target+filter. The FIRST call for any 'how many / does X exist' — "
         "never list to count.",
     )
     server.add_tool(
-        nil_get, name="nil_get",
+        nil_get,
+        name="nil_get",
         description="One lean record by key (target + id + optional fields). For exact lookups.",
     )
     server.add_tool(
-        nil_aggregate, name="nil_aggregate",
+        nil_aggregate,
+        name="nil_aggregate",
         description="Server-side rollup (target + group_by + metrics): 'revenue by country', 'count by "
         "status'. Small result; rows never enter context. Refuses → nil_export when unsupported.",
     )
     server.add_tool(
-        nil_export, name="nil_export",
+        nil_export,
+        name="nil_export",
         description="Stream a bulk read to a DATA HANDLE (not rows): open it in your sandbox and use code "
         "(pandas/sqlite) for analysis over many rows. Bulk extraction is gated+audited.",
     )
@@ -497,7 +597,9 @@ def connection_info(
             }
         }
     }
-    url = public_url or (f"http://{host}:{port}{HTTP_PATH}" if transport != "stdio" else None)
+    url = public_url or (
+        f"http://{host}:{port}{HTTP_PATH}" if transport != "stdio" else None
+    )
     return {
         "transport": transport,
         "skill_resource": SKILL_URI,
@@ -542,8 +644,12 @@ def serve(
 
             verbs = asyncio.run(_discover_verbs(adapter_url, bearer))
         tools = build_tools(
-            adapter_url=adapter_url, grant_id=grant_id, workspace=workspace,
-            bearer=bearer, scopes=scopes, gate=gate,
+            adapter_url=adapter_url,
+            grant_id=grant_id,
+            workspace=workspace,
+            bearer=bearer,
+            scopes=scopes,
+            gate=gate,
         )
         server = build_server(tools, dynamic_verbs=verbs, host=host, port=port)
         server.run(transport="stdio")
@@ -552,11 +658,19 @@ def serve(
     try:
         import uvicorn
     except ModuleNotFoundError as exc:  # pragma: no cover
-        raise RuntimeError("HTTP transport needs uvicorn (pip install 'uvicorn[standard]')") from exc
+        raise RuntimeError(
+            "HTTP transport needs uvicorn (pip install 'uvicorn[standard]')"
+        ) from exc
 
     app = build_asgi_app(
-        adapter_url=adapter_url, grant_id=grant_id, workspace=workspace,
-        bearer=bearer, scopes=scopes, gate=gate, dynamic_tools=dynamic_tools, auth_token=auth_token,
+        adapter_url=adapter_url,
+        grant_id=grant_id,
+        workspace=workspace,
+        bearer=bearer,
+        scopes=scopes,
+        gate=gate,
+        dynamic_tools=dynamic_tools,
+        auth_token=auth_token,
     )
     uvicorn.run(app, host=host, port=port)
 
@@ -625,11 +739,19 @@ def build_asgi_app(
     from nilscript.mcp.automation_tools import AutomationTools
     from nilscript.mcp.brain_tools import BrainTools
 
-    brain = BrainTools.from_env()  # graph/meta domain behind nil_intent (None if NIL_BRAIN_URL unset)
+    brain = (
+        BrainTools.from_env()
+    )  # graph/meta domain behind nil_intent (None if NIL_BRAIN_URL unset)
     automation = AutomationTools.from_env()  # automation domain behind nil_intent
     tools = build_tools(
-        adapter_url=adapter_url, grant_id=grant_id, workspace=workspace,
-        bearer=bearer, scopes=scopes, gate=gate, brain=brain, automation=automation,
+        adapter_url=adapter_url,
+        grant_id=grant_id,
+        workspace=workspace,
+        bearer=bearer,
+        scopes=scopes,
+        gate=gate,
+        brain=brain,
+        automation=automation,
     )
     if saas is None:
         saas = os.environ.get("NIL_MCP_SAAS", "") in ("1", "true", "True")
@@ -641,17 +763,26 @@ def build_asgi_app(
     provider: ToolsProvider | None = None
     if multi_tenant or saas:
         default = Tenant(
-            adapter_url=adapter_url, bearer=bearer, grant_id=grant_id,
-            workspace=workspace, scopes=scopes,
+            adapter_url=adapter_url,
+            bearer=bearer,
+            grant_id=grant_id,
+            workspace=workspace,
+            scopes=scopes,
         )
         from nilscript.mcp.registry import make_registry_lookup
 
         provider = TenantToolsProvider(
-            default=default, allow_insecure=allow_insecure, gate=gate,
-            registry=make_registry_lookup(), saas=saas, claim_resolver=claim_resolver,
+            default=default,
+            allow_insecure=allow_insecure,
+            gate=gate,
+            registry=make_registry_lookup(),
+            saas=saas,
+            claim_resolver=claim_resolver,
         )
     server = build_server(
-        tools, dynamic_verbs=verbs, tools_provider=provider,
+        tools,
+        dynamic_verbs=verbs,
+        tools_provider=provider,
         automation_tools=automation,
         brain_tools=brain,
         allowed_hosts=_allowed_hosts_from_env(),
@@ -665,15 +796,25 @@ def build_asgi_app(
 
     async def _healthz(_request):  # type: ignore[no-untyped-def]
         transport = NilTransport(base_url=adapter_url, bearer_secret=bearer)
+        adapter_ok = False
+        verbs = 0
         try:
             skeleton = await handshake(transport)
+            adapter_ok = bool(skeleton.get("reachable") and skeleton.get("conformant"))
+            verbs = len(skeleton.get("verbs", []))
+        except Exception:
+            pass
         finally:
             await transport.aclose()
-        ok = bool(skeleton.get("reachable") and skeleton.get("conformant"))
         return JSONResponse(
-            {"status": "ok" if ok else "degraded", "adapter": adapter_url,
-             "reachable": skeleton.get("reachable"), "verbs": len(skeleton.get("verbs", []))},
-            status_code=200 if ok else 503,
+            {
+                "status": "ok" if adapter_ok else "degraded",
+                "mcp_server": "ok",
+                "adapter": adapter_url,
+                "adapter_reachable": adapter_ok,
+                "verbs": verbs,
+            },
+            status_code=200,
         )
 
     app.add_route("/healthz", _healthz, methods=["GET"])
@@ -685,7 +826,10 @@ def build_asgi_app(
             async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
                 # /healthz stays open; everything else (the /mcp endpoint) needs the bearer.
                 if request.url.path.rstrip("/") != "/healthz":
-                    if request.headers.get("authorization", "") != f"Bearer {auth_token}":
+                    if (
+                        request.headers.get("authorization", "")
+                        != f"Bearer {auth_token}"
+                    ):
                         return JSONResponse({"error": "unauthorized"}, status_code=401)
                 return await call_next(request)
 
